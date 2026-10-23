@@ -129,6 +129,7 @@ Managed jobs carry a marker in their description, `[hvbo cloud=<SCVMM cloud ID> 
 ## Safety
 
 - Ships in plan-only mode (`auto_apply: false`). Each sync builds a plan you can review on the Plan page and apply by hand. Turn auto-apply on in the UI once you trust it.
+- You can apply the whole plan (automatic actions only, or including approvals) or one action at a time: each row on the Plan page and a cloud's page has its own **Apply** button. Applying one action counts as approving it, goes through the same safety checks, and refreshes the plan afterwards. A copy job whose source job does not exist yet, or a move into a job another action creates, cannot be applied alone; apply that other action first.
 - Plans older than 30 minutes cannot be applied; discovery must run again.
 - One run at a time. The scheduler and the buttons share a lock.
 - Every create, schedule change and copy job is read back from VBR and shown on the run page.
@@ -203,6 +204,9 @@ Open the app through your reverse proxy, then:
 Try the UI without any infrastructure: set `HVBO_MOCK=true` in `.env`. The mock estate adds a new VM on some discoveries to show auto-detection.
 
 ## Configuration notes
+
+`config/config.example.yaml` lists every setting with its default. All sections (`encryption`, `gfs`, `backup_copy`, `email` and so on) are top-level and apply globally to every cloud and every job the app manages; only the `*_repositories` maps and `include_clouds` / `exclude_clouds` are per cloud. A test fails if a setting is added to the app without being added to the example.
+
 
 - `template_job`: name of an existing Hyper-V job whose advanced, storage and guest processing (VSS) options are copied onto each new job, then retention is set. Use this for compression, encryption, health checks, application-aware processing and guest credentials, so every tenant job matches your standard.
 - Repository selection: `cloud_tier_repositories` beats `cloud_repositories`, which beats a tier's `repository`, which beats `default_repository`. A plan that targets a repository VBR does not have is blocked.

@@ -16,7 +16,7 @@ from fastapi.templating import Jinja2Templates
 
 from .config import load_config
 from .db import Store
-from .engine import Engine
+from .engine import Engine, needs_other_action
 
 logging.basicConfig(level=os.environ.get("HVBO_LOG_LEVEL", "INFO"),
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -88,6 +88,7 @@ STATUS_LABEL = {
     "skipped_stopped": "Stopped (skipped)", "no_guid": "No VM GUID",
 }
 templates.env.globals["STATUS_LABEL"] = STATUS_LABEL
+templates.env.globals["needs_other_action"] = needs_other_action
 
 
 def cloud_rows(plan: dict) -> list[dict]:
@@ -156,12 +157,13 @@ def cloud_detail(cloud_id: str, request: Request, user: str = Depends(who)):
         raise HTTPException(404)
     vms = [v for v in c["plan"]["vm_status"] if v["cloud_id"] == cloud_id]
     actions = [a for a in c["plan"]["actions"] if a.get("cloud_id") == cloud_id]
-    return templates.TemplateResponse(request, "cloud.html", {**c, "cloud": cloud, "vms": vms, "actions": actions})
+    return templates.TemplateResponse(request, "cloud.html", {**c, "cloud": cloud, "vms": vms, "actions": actions,
+                                                              "apply_one": True})
 
 
 @app.get("/plan", response_class=HTMLResponse)
 def plan_page(request: Request, user: str = Depends(who)):
-    return templates.TemplateResponse(request, "plan.html", ctx(request))
+    return templates.TemplateResponse(request, "plan.html", {**ctx(request), "apply_one": True})
 
 
 @app.get("/schedule", response_class=HTMLResponse)
@@ -222,6 +224,13 @@ def action_run(mode: str = Form(...), user: str = Depends(who)):
 @app.post("/actions/apply-plan")
 def action_apply_plan(run_id: int = Form(...), include_manual: bool = Form(False), user: str = Depends(who)):
     new_id = engine.start(f"manual:{user}", "apply_stored", from_run=run_id, include_manual=include_manual)
+    return RedirectResponse(f"/runs/{new_id}" if new_id else "/?busy=1", 303)
+
+
+@app.post("/actions/apply-one")
+def action_apply_one(run_id: int = Form(...), action_id: str = Form(...), user: str = Depends(who)):
+    """Apply a single action from a stored plan (approval-only actions included), then re-plan."""
+    new_id = engine.start(f"manual:{user}", "apply_one", from_run=run_id, only_action=action_id)
     return RedirectResponse(f"/runs/{new_id}" if new_id else "/?busy=1", 303)
 
 

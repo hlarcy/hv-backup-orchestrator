@@ -72,6 +72,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .btn.accent:hover { filter: brightness(.95); }
 .btn.ghost { background: var(--white); color: var(--arc-dark); border: 1px solid var(--line); }
 .btn[disabled] { opacity: .5; cursor: not-allowed; }
+.btn.small { padding: 5px 12px; font-size: .85em; }
 form.inline { display: inline; }
 .actions-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 

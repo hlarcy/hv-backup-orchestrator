@@ -18,6 +18,15 @@ log = logging.getLogger("hvbo.engine")
 PLAN_MAX_AGE_SECONDS = 30 * 60
 
 
+def needs_other_action(a: dict) -> str | None:
+    """Why this action cannot be applied on its own (it relies on a job another action creates)."""
+    if a["type"] == "create_copy" and not a.get("source_job_id"):
+        return f"the copy job needs '{a.get('source_job_name')}', which another action creates. Apply that first."
+    if a["type"] == "move_vms" and not a.get("exists") and not a.get("create_target"):
+        return f"the target job '{a['job_name']}' is created by another action. Apply that first."
+    return None
+
+
 class RunLog:
     def __init__(self):
         self.lines: list[str] = []
@@ -71,10 +80,11 @@ class Engine:
 
     # ---- the run itself
     def _run(self, run_id: int, trigger: str, mode: str, rebalance: bool = False,
-             include_manual: bool = False, from_run: int | None = None) -> None:
+             include_manual: bool = False, from_run: int | None = None,
+             only_action: str | None = None) -> None:
         rl = RunLog()
         try:
-            if mode == "apply_stored":
+            if mode in ("apply_stored", "apply_one"):
                 plan = self._stored_plan(from_run, rl)
             else:
                 plan = self._discover_and_plan(rl, rebalance)
@@ -83,6 +93,13 @@ class Engine:
             results: list[dict] = []
             if mode in ("apply", "apply_stored"):
                 results = self._apply(plan, rl, include_manual)
+            elif mode == "apply_one":
+                # One action, chosen by a person, so approval-only actions are allowed. Then re-plan,
+                # so the Plan page shows what is left rather than a list that is now out of date.
+                results = self._apply(plan, rl, True, only=only_action)
+                rl("Refreshing the plan after the change")
+                plan = self._discover_and_plan(rl, False)
+                self.store.update_run(run_id, plan=plan, summary=plan["summary"], log=rl.text())
             ok = all(r.get("ok") for r in results)
             status = "planned" if mode == "plan" else ("applied" if ok else "partial")
             if mode != "plan" and not results:
@@ -183,7 +200,21 @@ class Engine:
             rl(f"{'OK  ' if r.get('ok') else 'FAIL'} {r.get('op')} {r.get('job_name')}: {' '.join(r.get('messages') or [])}")
         return results
 
-    def _apply(self, plan: dict, rl: RunLog, include_manual: bool) -> list[dict]:
+    def _apply(self, plan: dict, rl: RunLog, include_manual: bool, only: str | None = None) -> list[dict]:
+        if only is not None:
+            chosen = next((a for a in plan["actions"] if a["id"] == only), None)
+            if chosen is None:
+                rl(f"Action {only} is not in this plan. Refresh the plan and try again.")
+                return []
+            if chosen.get("blocked"):
+                rl(f"Blocked: {chosen['job_name']}: {chosen['blocked']}")
+                return []
+            dep = needs_other_action(chosen)
+            if dep:
+                rl(f"Not applied: {dep}")
+                return []
+            rl(f"Applying one action: {chosen['type']} {chosen['job_name']}")
+            plan = {**plan, "actions": [chosen]}
         todo = [a for a in plan["actions"] if not a.get("blocked") and (a["auto"] or include_manual)]
         for a in plan["actions"]:
             if a.get("blocked"):

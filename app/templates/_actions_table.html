@@ -1,5 +1,5 @@
 <div class="tablewrap"><table>
-  <thead><tr><th>Action</th><th>Job</th><th>Cloud</th><th>Tier</th><th>Start</th><th>Repository</th><th class="num">VMs</th><th>Reason</th><th>State</th></tr></thead>
+  <thead><tr><th>Action</th><th>Job</th><th>Cloud</th><th>Tier</th><th>Start</th><th>Repository</th><th class="num">VMs</th><th>Reason</th><th>State</th>{% if apply_one %}<th></th>{% endif %}</tr></thead>
   <tbody>
   {% for a in actions %}
     <tr>
@@ -13,9 +13,14 @@
       <td class="small">{{ a.reason }}{% if a.vms %}<details><summary class="small">VMs</summary>{{ a.vms|map(attribute='name')|join(', ') }}</details>{% endif %}</td>
       <td>{% if a.blocked %}<span class="pill bad">Blocked</span><div class="small">{{ a.blocked }}</div>
           {% elif a.auto %}<span class="pill ok">Automatic</span>{% else %}<span class="pill warn">Needs approval</span>{% endif %}</td>
+      {% if apply_one %}{% set dep = needs_other_action(a) %}
+      <td><form class="inline" method="post" action="/actions/apply-one" onsubmit="return confirm('Apply only this action to VBR?')">
+        <input type="hidden" name="run_id" value="{{ latest.id }}"><input type="hidden" name="action_id" value="{{ a.id }}">
+        <button class="btn small" title="{{ ('Not on its own: ' ~ dep) if dep else ('Blocked' if a.blocked else 'Apply just this action, then refresh the plan') }}" {{ 'disabled' if busy or a.blocked or dep }}>Apply</button>
+      </form></td>{% endif %}
     </tr>
   {% else %}
-    <tr><td colspan="9" class="muted">No changes needed. Every in-scope VM is in a backup job and every managed job is on its slot.</td></tr>
+    <tr><td colspan="{{ 10 if apply_one else 9 }}" class="muted">No changes needed. Every in-scope VM is in a backup job and every managed job is on its slot.</td></tr>
   {% endfor %}
   </tbody>
 </table></div>
