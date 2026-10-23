@@ -114,7 +114,11 @@ New-NetFirewallRule -DisplayName "WinRM HTTPS" -Direction Inbound -Protocol TCP 
 Set-Item WSMan:\localhost\Service\Auth\Basic $false
 ```
 
-Mount your internal CA certificate into `/config` and set `ca_bundle`, or set `cert_validation: false` for a first test only.
+Then tell the app how to trust the certificate, per host:
+
+- CA-issued certificate: mount your internal CA root (PEM) into `/config` and set `ca_bundle`.
+- Self-signed certificate: set `cert_thumbprint` to the listener certificate's thumbprint. Only that exact certificate is accepted, so this is as strict as CA validation for a single host, and connecting by IP address works. Read it on the server with `Get-ChildItem WSMan:\localhost\Listener\*\CertificateThumbprint` (or `winrm enumerate winrm/config/listener`). Pasting with spaces, colons or the hidden character certmgr adds is fine.
+- If a TLS connection fails, the Diagnostics page shows the thumbprint the server actually presented, so you can compare it with the one on the server.
 
 ### Veeam module and PowerShell 7
 

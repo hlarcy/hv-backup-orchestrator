@@ -31,6 +31,10 @@ class RemoteHost:
     auth: str = "negotiate"  # negotiate | ntlm | kerberos | credssp | basic
     cert_validation: bool = True
     ca_bundle: str | None = None
+    # Pin the server's certificate by thumbprint (SHA-1 as Windows shows it, or SHA-256).
+    # When set, the certificate is trusted if and only if its thumbprint matches, so a
+    # self-signed certificate works without a CA bundle, and hostname/IP mismatches don't matter.
+    cert_thumbprint: str | None = None
     configuration_name: str = "Microsoft.PowerShell"
     operation_timeout: int = 600
 
@@ -155,6 +159,18 @@ DEFAULT_TIERS = {
 }
 
 
+def normalise_thumbprint(value: str | None) -> str | None:
+    """Accept a thumbprint as pasted from Windows: any case, spaces, colons, and the
+    invisible left-to-right mark certmgr adds. Returns lowercase hex, or raises."""
+    if not value:
+        return None
+    hexonly = "".join(ch for ch in str(value).lower() if ch in "0123456789abcdef")
+    if len(hexonly) not in (40, 64):
+        raise ValueError(f"cert_thumbprint must be a 40-character SHA-1 or 64-character SHA-256 hex value, "
+                         f"got {len(hexonly)} hex characters from '{value}'")
+    return hexonly
+
+
 def _remote(section: dict | None, prefix: str) -> RemoteHost | None:
     if not section or not section.get("host"):
         return None
@@ -167,6 +183,7 @@ def _remote(section: dict | None, prefix: str) -> RemoteHost | None:
         auth=section.get("auth", "negotiate"),
         cert_validation=bool(section.get("cert_validation", True)),
         ca_bundle=section.get("ca_bundle"),
+        cert_thumbprint=normalise_thumbprint(_secret(f"{prefix}_CERT_THUMBPRINT", section.get("cert_thumbprint"))),
         configuration_name=section.get("configuration_name", "Microsoft.PowerShell"),
         operation_timeout=int(section.get("operation_timeout", 600)),
     )

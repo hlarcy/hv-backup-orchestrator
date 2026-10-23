@@ -19,14 +19,21 @@ scvmm:
   auth: ntlm                     # negotiate | ntlm | kerberos (build with KERBEROS=1) | credssp
   cert_validation: true          # or set ca_bundle to your internal CA PEM mounted into /config
   # ca_bundle: /config/arc-root-ca.pem
+  # cert_thumbprint: "A1B2..."   # trust exactly this certificate (e.g. self-signed); see vbr below
   configuration_name: Microsoft.PowerShell   # VMM module is Windows PowerShell 5.1
   operation_timeout: 600
 
 vbr:
-  host: vbr01.arc.local          # Windows VBR 13.1 server
+  host: vbr01.arc.local          # Windows VBR 13.1 server (an IP address is fine when cert_thumbprint is set)
   ssl: true
-  auth: ntlm
+  auth: ntlm                     # workgroup server: local account, VBR_USERNAME=VBR01\svc-hvbo
   cert_validation: true
+  # Pin the WinRM HTTPS certificate by thumbprint. The connection is accepted only if the
+  # server presents exactly this certificate, so self-signed certificates work and the
+  # hostname/IP does not need to match. Copy from the server:
+  #   Get-ChildItem WSMan:\localhost\Listener\*\CertificateThumbprint
+  # Can also be set with VBR_CERT_THUMBPRINT in .env.
+  # cert_thumbprint: "D1CD2DE286756D1F3C83594F5FA5B0930ACB0479"
   # If the Veeam module will not load in Windows PowerShell 5.1, register a PowerShell 7
   # endpoint on the VBR server (pwsh: Enable-PSRemoting) and set this to PowerShell.7
   configuration_name: Microsoft.PowerShell
