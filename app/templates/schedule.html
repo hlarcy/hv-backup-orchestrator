@@ -11,7 +11,7 @@
 </div>
 <div class="legend">
   <span><i style="background:#302A32"></i>Managed job</span>
-  <span><i style="background:#302A32;box-shadow:inset 0 -4px 0 #14F2AF"></i>Managed, large data</span>
+  <span><i style="background:#302A32;box-shadow:inset 0 -4px 0 #14F2AF"></i>Managed, longer retention</span>
   <span><i style="border:2px dashed #302A32"></i>Planned new job</span>
   <span><i style="background:#E6E3E8;background-image:repeating-linear-gradient(45deg,transparent 0 3px,#cfcad3 3px 5px)"></i>Reserved (other job)</span>
   <span><i style="background:#F3F8FF;border:1px solid #E3E6EE"></i>Free</span>
@@ -20,7 +20,7 @@
   {% for h, slots in hours.items() %}
   <div class="hourrow"><div class="h">{{ h }}:00</div>
     <div class="slots">
-      {% for s in slots %}<div class="slot {{ s.state }} {{ s.tier or '' }}" title="{{ s.time }}{% if s.job_name %}: {{ s.job_name }}{% endif %}"></div>{% endfor %}
+      {% for s in slots %}<div class="slot {{ s.state }} {{ 'large' if s.tier in cfg.tiers and cfg.tiers[s.tier].retention_days > cfg.tiers[cfg.default_tier].retention_days else '' }}" title="{{ s.time }}{% if s.job_name %}: {{ s.job_name }}{% endif %}"></div>{% endfor %}
     </div></div>
   {% endfor %}
 </div>
@@ -31,7 +31,7 @@
   <tbody>
   {% for s in plan.timeline if s.state != 'free' %}
     <tr><td><b>{{ s.time }}</b></td><td>{{ s.job_name }}</td><td>{{ s.cloud_name or '' }}</td>
-      <td>{% if s.tier %}<span class="tag {{ s.tier }}">{{ cfg.tiers[s.tier].label if s.tier in cfg.tiers else s.tier }}</span>{% endif %}</td>
+      <td>{% if s.tier %}<span class="tag {{ 'large' if s.tier in cfg.tiers and cfg.tiers[s.tier].retention_days > cfg.tiers[cfg.default_tier].retention_days else 'standard' }}">{{ cfg.tiers[s.tier].retention_days ~ ' days' if s.tier in cfg.tiers else s.tier }}</span>{% endif %}</td>
       <td>{{ {'managed': 'Managed', 'planned': 'Planned', 'reserved': 'Reserved'}[s.state] }}</td></tr>
   {% endfor %}
   </tbody>

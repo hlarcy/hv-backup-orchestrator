@@ -59,19 +59,14 @@ class TierConfig:
 
 @dataclass
 class ClassificationConfig:
+    # SCVMM custom property on the VM holding its retention in days.
+    # A whole number above 0 is always used as-is. Blank, missing or anything else: default_retention_days.
     custom_property: str | None = "BackupTier"
-    large_values: list[str] = field(default_factory=lambda: ["LargeData", "Large", "90"])
-    large_tags: list[str] = field(default_factory=lambda: ["LargeData"])
-    # Every VM is backed up by default. Exclusions are off unless values are listed here.
-    exclude_values: list[str] = field(default_factory=list)
-    exclude_tags: list[str] = field(default_factory=list)
-    large_disk_threshold_gb: float | None = None  # off: only the property/tag makes a VM large data
-    disk_size_basis: str = "max"  # max (provisioned) | used
 
 
 @dataclass
 class RetierConfig:
-    auto_upgrade: bool = True        # 30d -> 90d when the LargeData property/tag appears
+    auto_upgrade: bool = True        # retention raised: move VM and restore points to the longer job
     auto_downgrade: bool = False     # 90d -> 30d when it is removed (would shorten history): approval
     auto_cross_cloud: bool = False   # VM moved to another SCVMM cloud: approval
     remap_backups: bool = True       # move existing restore points with the VM (Move-VBRBackup)
@@ -98,7 +93,7 @@ class ScheduleConfig:
     window_end: str = "00:00"
     stagger_minutes: int = 3
     avoid_unmanaged_job_times: bool = True
-    order: str = "first_free"  # first_free | large_first (used by rebalance)
+    order: str = "first_free"  # first_free | longest_first (used by rebalance; large_first also accepted)
 
 
 @dataclass
@@ -108,7 +103,8 @@ class AppConfig:
     sync_interval_minutes: int = 60
     auto_apply: bool = False
     coverage_mode: str = "any_hyperv_job"  # any_hyperv_job | managed_only
-    default_tier: str = "standard"
+    default_retention_days: int = 30
+    retention_repositories: dict = field(default_factory=dict)   # {days: repository}, e.g. {365: "SOBR-LTR"}
     include_stopped_vms: bool = True
     job_name_template: str = "HVBO {cloud} {tier_label}"
     job_name_max_length: int = 50
@@ -127,21 +123,36 @@ class AppConfig:
     vbr: RemoteHost | None = None
     scvmm: RemoteHost | None = None
     scvmm_server_name: str = "localhost"
-    ui_user: str | None = None
-    ui_password: str | None = None
-    auth_disabled: bool = False
     source_path: str | None = None
 
+    @property
+    def default_tier(self) -> str:
+        return self.tier_for_days(self.default_retention_days)
+
     def repository_for(self, cloud_name: str, tier: str) -> str:
-        per_cloud_tier = self.cloud_tier_repositories.get(cloud_name, {})
-        if tier in per_cloud_tier:
-            return per_cloud_tier[tier]
-        if cloud_name in self.cloud_repositories:
-            return self.cloud_repositories[cloud_name]
-        tier_cfg = self.tiers.get(tier)
-        if tier_cfg and tier_cfg.repository:
-            return tier_cfg.repository
-        return self.default_repository
+        days = self.tiers[tier].retention_days if tier in self.tiers else None
+
+        def lookup(mapping: dict):
+            for k in (tier, days, str(days)):
+                if k is not None and k in mapping:
+                    return mapping[k]
+            return None
+
+        return (lookup(self.cloud_tier_repositories.get(cloud_name, {}))
+                or self.cloud_repositories.get(cloud_name)
+                or lookup(self.retention_repositories)
+                or self.default_repository)
+
+    def tier_for_days(self, days: int) -> str:
+        """Tier key for a retention in days: one key, one job per cloud, per distinct value."""
+        key = f"d{int(days)}"
+        if key not in self.tiers:
+            self.tiers[key] = TierConfig(key=key, label=f"{int(days)}d", retention_days=int(days))
+        return key
+
+    def tiers_by_retention(self, keys=None) -> list[str]:
+        keys = list(keys if keys is not None else self.tiers)
+        return sorted(keys, key=lambda k: (-(self.tiers[k].retention_days if k in self.tiers else 0), k))
 
     def copy_repository_for(self, cloud_name: str) -> str | None:
         return self.backup_copy.cloud_repositories.get(cloud_name) or self.backup_copy.target_repository
@@ -154,15 +165,11 @@ class AppConfig:
         for key in ("vbr", "scvmm"):
             if d.get(key) and d[key].get("password"):
                 d[key]["password"] = "********"
-        if d.get("ui_password"):
-            d["ui_password"] = "********"
         return d
 
 
-DEFAULT_TIERS = {
-    "large": TierConfig(key="large", label="LargeData 90d", retention_days=90),
-    "standard": TierConfig(key="standard", label="Standard 30d", retention_days=30),
-}
+# Job markers written before retention became a plain number of days.
+LEGACY_TIER_DAYS = {"large": 90}
 
 
 def normalise_thumbprint(value: str | None) -> str | None:
@@ -205,15 +212,6 @@ def load_config(path: str | None = None) -> AppConfig:
     if Path(path).exists():
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
 
-    tiers = dict(DEFAULT_TIERS)
-    for key, t in (raw.get("tiers") or {}).items():
-        tiers[key] = TierConfig(
-            key=key,
-            label=t.get("label", key),
-            retention_days=int(t["retention_days"]),
-            repository=t.get("repository"),
-        )
-
     cls_raw = raw.get("classification") or {}
     cls = ClassificationConfig(**{k: v for k, v in cls_raw.items() if k in ClassificationConfig.__dataclass_fields__})
     sch_raw = raw.get("schedule") or {}
@@ -234,7 +232,8 @@ def load_config(path: str | None = None) -> AppConfig:
         sync_interval_minutes=int(raw.get("sync_interval_minutes", 60)),
         auto_apply=bool(raw.get("auto_apply", False)),
         coverage_mode=raw.get("coverage_mode", "any_hyperv_job"),
-        default_tier=raw.get("default_tier", "standard"),
+        default_retention_days=int(raw.get("default_retention_days", 30)),
+        retention_repositories=raw.get("retention_repositories") or {},
         include_stopped_vms=bool(raw.get("include_stopped_vms", True)),
         job_name_template=raw.get("job_name_template", "HVBO {cloud} {tier_label}"),
         job_name_max_length=int(raw.get("job_name_max_length", 50)),
@@ -244,7 +243,6 @@ def load_config(path: str | None = None) -> AppConfig:
         cloud_tier_repositories=raw.get("cloud_tier_repositories") or {},
         exclude_clouds=raw.get("exclude_clouds") or [],
         include_clouds=raw.get("include_clouds") or [],
-        tiers=tiers,
         classification=cls,
         schedule=sch,
         retier=ret,
@@ -253,9 +251,9 @@ def load_config(path: str | None = None) -> AppConfig:
         vbr=_remote(raw.get("vbr"), "VBR"),
         scvmm=_remote(raw.get("scvmm"), "SCVMM"),
         scvmm_server_name=(raw.get("scvmm") or {}).get("vmm_server_name", "localhost"),
-        ui_user=_secret("HVBO_UI_USER"),
-        ui_password=_secret("HVBO_UI_PASSWORD"),
-        auth_disabled=os.environ.get("HVBO_AUTH_DISABLED", "").lower() in ("1", "true", "yes"),
         source_path=path,
     )
+    if cfg.default_retention_days <= 0:
+        raise ValueError("default_retention_days must be a whole number above 0")
+    cfg.tier_for_days(cfg.default_retention_days)
     return cfg

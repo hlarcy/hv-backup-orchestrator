@@ -61,7 +61,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
-.tag { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 4px; background: var(--arc-dark); color: var(--white); }
+.tag { display: inline-block; white-space: nowrap; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 4px; background: var(--arc-dark); color: var(--white); }
 .tag.large { background: var(--arc-dark); color: var(--arc-green); }
 .tag.standard { background: #E6E3E8; color: var(--arc-dark); }
 .tag.exclude { background: var(--white); border: 1px solid var(--line); color: var(--muted); }

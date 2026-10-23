@@ -9,7 +9,10 @@ include_stopped_vms: true
 # Coverage: any_hyperv_job = a VM already in ANY Hyper-V job (including hand-built ones) counts as
 # backed up and is left alone. managed_only = every cloud VM also goes into this tool's 30/90-day jobs.
 coverage_mode: any_hyperv_job
-default_tier: standard           # every VM lands here unless marked LargeData
+
+# Retention: the number of days in the VM's BackupTier custom property (any whole number above 0,
+# shorter or longer than the default). Blank, missing or not a number: this default.
+default_retention_days: 30
 
 # ---------------------------------------------------------------- remote hosts (PSRP over WinRM)
 scvmm:
@@ -48,28 +51,13 @@ vbr:
   accept_local_tls_certificate: true
   operation_timeout: 900
 
-# ---------------------------------------------------------------- tiers and retention
-tiers:
-  large:
-    label: LargeData 90d
-    retention_days: 90
-    # repository: SOBR-LongTerm  # optional per-tier repository
-  standard:
-    label: Standard 30d
-    retention_days: 30
-
+# ---------------------------------------------------------------- retention
 classification:
-  # Only these mark a VM as large data (90 days). Everything else is 30 days, whatever its size.
-  custom_property: BackupTier          # SCVMM custom property on the VM
-  large_values: [LargeData]
-  large_tags: [LargeData]              # SCVMM VM tags
-  exclude_values: []                   # empty = no VM can opt out; every VM is backed up
-  exclude_tags: []
-  large_disk_threshold_gb: null        # off; set e.g. 2048 to also treat big VMs as large data
+  custom_property: BackupTier    # SCVMM custom property on the VM, e.g. 7, 45, 180, 400
 
 retier:
-  auto_upgrade: true             # LargeData added: move VM from the 30d job to the 90d job (creating it if needed)
-  auto_downgrade: false          # LargeData removed: moving back shortens retention, so it waits for approval
+  auto_upgrade: true             # retention increased: move VM (and restore points) to the longer job, creating it if needed
+  auto_downgrade: false          # retention decreased: shortens how long backups are kept, so it waits for approval
   auto_cross_cloud: false        # VM moved to another SCVMM cloud: wait for approval
   remap_backups: true            # move existing restore points with the VM (Move-VBRBackup; needs per-machine backup files)
 
@@ -85,12 +73,13 @@ safety:
   reserve_foreign_job_times: true     # never start a managed job in the same 3 minutes as a VMware/Nutanix/other job
 
 # ---------------------------------------------------------------- jobs
-job_name_template: "HVBO {cloud} {tier_label}"   # tokens: {cloud} {tier} {tier_label} {retention}
+job_name_template: "HVBO {cloud} {tier_label}"   # e.g. "HVBO Murrays Hall 30d". Tokens: {cloud} {tier_label} {retention}
 job_name_max_length: 50
 template_job: null               # name of an existing VBR job to copy advanced/VSS options from
 default_repository: "SOBR-Tenants"
+retention_repositories: {}       # optional per-retention target, e.g. {365: "SOBR-LongTerm"}
 cloud_repositories: {}           # per-cloud override, e.g. {"Acme Legal": "REPO-ACME"}
-cloud_tier_repositories: {}      # e.g. {"Acme Legal": {large: "REPO-ACME-LTR"}}
+cloud_tier_repositories: {}      # per cloud and retention, e.g. {"Acme Legal": {365: "REPO-ACME-LTR"}}
 include_clouds: []               # empty = all clouds
 exclude_clouds: []               # e.g. ["Infrastructure"]
 
@@ -100,4 +89,4 @@ schedule:
   window_end: "00:00"            # 120 start slots at a 3-minute stagger
   stagger_minutes: 3
   avoid_unmanaged_job_times: true  # do not start a managed job in the same 3 minutes as a hand-built job
-  order: first_free              # rebalance order: first_free (by cloud name) | large_first
+  order: first_free              # rebalance order: first_free (by cloud name) | longest_first

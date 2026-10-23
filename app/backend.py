@@ -138,11 +138,13 @@ class MockBackend:
                     "host": rnd.choice(hosts), "cluster": "HVCL01.arc.local",
                     "status": rnd.choice(["Running"] * 9 + ["PowerOff"]), "in_library": False,
                     "max_gb": round(rnd.uniform(2200, 8000) if big else rnd.uniform(60, 600), 1),
-                    "used_gb": 0, "custom_property": "LargeData" if big and rnd.random() < 0.5 else None, "tags": [],
+                    "used_gb": 0, "custom_property": "90" if big and rnd.random() < 0.5 else None, "tags": [],
                 })
         for v in vms:
             v["used_gb"] = round(v["max_gb"] * random.Random(v["name"]).uniform(0.3, 0.8), 1)
-        vms[12]["tags"] = ["LargeData"]
+        vms[12]["custom_property"] = "14"
+        vms[20]["custom_property"] = "180"
+        vms[33]["custom_property"] = "Large please"   # not a number: default
         acme = [v for v in vms if v["cloud_name"] == "Acme Legal"][:3]
         jobs = [
             {"id": str(uuid.uuid4()), "name": "Legacy Acme Daily", "description": "Built by hand", "type": "Hyper-V Backup",
@@ -184,12 +186,12 @@ class MockBackend:
                 "cluster": "HVCL01.arc.local", "status": "Running", "in_library": False,
                 "max_gb": 127.0, "used_gb": 40.0, "custom_property": None, "tags": [],
             })
-        elif r < 0.8:  # someone sets BackupTier=LargeData on a VM already in a 30-day job
-            in_std = {o["refs"][0] for j in st["jobs"] if "tier=standard]" in (j.get("description") or "")
+        elif r < 0.8:  # someone sets BackupTier=90 on a VM already in a default-retention job
+            in_std = {o["refs"][0] for j in st["jobs"] if f"tier=d{self.cfg.default_retention_days}]" in (j.get("description") or "")
                       for o in j["objects"] if o["refs"]}
             cands = [v for v in st["vms"] if v["vm_guid"] in in_std and not v.get("custom_property")]
             if cands:
-                random.choice(cands)["custom_property"] = "LargeData"
+                random.choice(cands)["custom_property"] = "90"
         self._save()
         return json.loads(json.dumps(st["clouds"])), json.loads(json.dumps(st["vms"]))
 

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from app.backend import MockBackend
-from app.config import AppConfig, BackupCopyConfig, DEFAULT_TIERS
+from app.config import AppConfig, BackupCopyConfig
 from app.engine import Engine
 from app.db import Store
 from app.safety import SafetyError, validate_ops
@@ -81,7 +81,7 @@ def test_every_apply_operation_asserts_ownership_before_changing():
 
 
 def test_end_to_end_mock_never_touches_vmware_or_nutanix(tmp_path):
-    c = AppConfig(tiers=dict(DEFAULT_TIERS), default_repository="SOBR-Tenants", mock=True, data_dir=str(tmp_path))
+    c = AppConfig(default_repository="SOBR-Tenants", mock=True, data_dir=str(tmp_path))
     c.backup_copy = BackupCopyConfig(enabled=True, target_repository="SOBR-Copy-7d")
     eng = Engine(c, Store(str(tmp_path)))
     import copy, time
@@ -100,7 +100,7 @@ def test_end_to_end_mock_never_touches_vmware_or_nutanix(tmp_path):
 
 
 def test_mock_refuses_foreign_job_even_if_python_guard_bypassed(tmp_path):
-    c = AppConfig(tiers=dict(DEFAULT_TIERS), mock=True, data_dir=str(tmp_path))
+    c = AppConfig(mock=True, data_dir=str(tmp_path))
     b = MockBackend(c)
     vmw = b.state["foreign"][0]
     r = b.apply([{"id": "x", "op": "set_schedule", "job_id": vmw["id"], "start_time": "18:00"}])[0]

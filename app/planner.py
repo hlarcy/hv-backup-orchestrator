@@ -34,6 +34,18 @@ def norm_guid(value: Any) -> str | None:
     return m.group(0).lower() if m else None
 
 
+def normalise_tier_key(tier: str, cfg: AppConfig) -> str:
+    """Tier keys are 'd<days>'. Markers from earlier versions ('standard', 'large') are mapped."""
+    from .config import LEGACY_TIER_DAYS
+    if re.fullmatch(r"d\d+", tier or ""):
+        return cfg.tier_for_days(int(tier[1:]))
+    if tier == "standard":
+        return cfg.default_tier
+    if tier in LEGACY_TIER_DAYS:
+        return cfg.tier_for_days(LEGACY_TIER_DAYS[tier])
+    return tier
+
+
 def job_key(cloud_id: str, tier: str) -> str:
     return f"{cloud_id}|{tier}"
 
@@ -63,36 +75,23 @@ def parse_marker(description: str | None) -> tuple[str, str] | None:
 
 # --------------------------------------------------------------------------- classification
 
+DAYS_RE = re.compile(r"^\s*(\d+)\s*$")
+
+
 def classify(vm: dict, cfg: AppConfig) -> tuple[str, str]:
-    """Return (tier, reason). Tier is 'large', 'standard' or 'exclude'.
+    """Return (tier, reason). The tier is always a retention in days.
 
-    Precedence: SCVMM custom property, then SCVMM tag, then disk size, then default.
+    The custom property holds the retention. A whole number above 0 is used exactly as given,
+    shorter or longer than the default. Blank, missing or anything else gives the default.
     """
-    c = cfg.classification
-    prop = (vm.get("custom_property") or "").strip()
-    if prop and c.custom_property:
-        p = prop.lower()
-        if p in [v.lower() for v in c.exclude_values]:
-            return "exclude", f"Custom property {c.custom_property}={prop}"
-        if p in [v.lower() for v in c.large_values]:
-            return "large", f"Custom property {c.custom_property}={prop}"
-        if p in ("standard", "std", "30"):
-            return "standard", f"Custom property {c.custom_property}={prop}"
-        if p in cfg.tiers:
-            return p, f"Custom property {c.custom_property}={prop}"
-
-    tags = {t.lower() for t in (vm.get("tags") or [])}
-    if tags & {t.lower() for t in c.exclude_tags}:
-        return "exclude", "SCVMM tag (exclude)"
-    if tags & {t.lower() for t in c.large_tags}:
-        return "large", "SCVMM tag (large data)"
-
-    if c.large_disk_threshold_gb:
-        size = vm.get("used_gb" if c.disk_size_basis == "used" else "max_gb") or 0
-        if size >= c.large_disk_threshold_gb:
-            return "large", f"Disk size {size:,.0f} GB >= {c.large_disk_threshold_gb:,.0f} GB"
-
-    return "standard", "Default"
+    name = cfg.classification.custom_property
+    prop = (vm.get("custom_property") or "").strip() if name else ""
+    if not prop:
+        return cfg.default_tier, "Not set: default"
+    m = DAYS_RE.match(prop)
+    if m and int(m.group(1)) > 0:
+        return cfg.tier_for_days(int(m.group(1))), f"{name}={prop}"
+    return cfg.default_tier, f"{name}={prop} is not a whole number of days: default"
 
 
 # --------------------------------------------------------------------------- coverage
@@ -218,6 +217,10 @@ def build_plan(
 
     cloud_by_id = {c["id"]: c for c in clouds}
 
+    def retention(tier: str) -> int:
+        t = cfg.tiers.get(tier)
+        return t.retention_days if t else 0
+
     def cloud_name_of(cid: str) -> str:
         return cloud_by_id.get(cid, {}).get("name", cid)
 
@@ -233,18 +236,20 @@ def build_plan(
         m = parse_marker(j.get("description"))
         if not m:
             continue
+        m = (m[0], normalise_tier_key(m[1], cfg))
         key = job_key(*m)
         if key in managed:
             warnings.append(f"Two jobs claim {key}: '{managed[key]['name']}' and '{j['name']}'. Using the first.")
             continue
         j["managed_key"] = key
         managed[key] = j
+
     managed_ids = {j["id"] for j in managed.values()}
     managed_copies: dict[str, dict] = {}
     for cj in copy_jobs:
         m = parse_copy_marker(cj.get("description"))
         if m:
-            managed_copies.setdefault(job_key(*m), cj)
+            managed_copies.setdefault(job_key(m[0], normalise_tier_key(m[1], cfg)), cj)
     taken_names = {n.lower() for n in (all_job_names or [])} | {j["name"].lower() for j in jobs} \
         | {c["name"].lower() for c in copy_jobs} | {f["name"].lower() for f in foreign_jobs}
 
@@ -270,8 +275,8 @@ def build_plan(
     alloc = SlotAllocator(window, reserved)
 
     if rebalance:
-        tier_rank = {"large": 0} if cfg.schedule.order == "large_first" else {}
-        order = sorted(managed, key=lambda k: (tier_rank.get(k.split("|")[1], 1),
+        longest = cfg.schedule.order in ("large_first", "longest_first")
+        order = sorted(managed, key=lambda k: (-retention(k.split("|")[1]) if longest else 0,
                                                cloud_name_of(k.split("|")[0]).lower(), k.split("|")[1]))
     else:
         order = sorted(managed, key=lambda k: (k not in slot_table, k))
@@ -296,10 +301,6 @@ def build_plan(
                  if o.get("kind") == "vm" and not any(norm_guid(r) for r in o.get("refs") or []))
     if no_ref:
         warnings.append(f"{no_ref} VM object(s) in Veeam jobs expose no VM GUID; they are matched by unique name only.")
-
-    def retention(tier: str) -> int:
-        t = cfg.tiers.get(tier)
-        return t.retention_days if t else 0
 
     vm_status: list[dict] = []
     pending: dict[str, list[dict]] = defaultdict(list)                  # job_key -> VMs to add
@@ -381,7 +382,7 @@ def build_plan(
 
     def order_key(key: str):
         cid, tier = key.split("|")
-        return (cloud_name_of(cid).lower(), 0 if tier == "large" else 1, tier)
+        return (cloud_name_of(cid).lower(), -retention(tier), tier)
 
     for key in sorted(pending, key=order_key):
         vm_list = pending[key]

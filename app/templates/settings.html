@@ -4,18 +4,16 @@
 <p class="lede">Effective configuration, with secrets masked. Edit <code>config/config.yaml</code> and the <code>.env</code> file, then restart the container. Auto-apply and pause are runtime toggles on the overview page and override the file value.</p>
 <div class="grid2">
   <div class="panel dark">
-    <h3>How a VM is tiered</h3>
+    <h3>How retention is set</h3>
     <ul class="arrows">
-      <li>Every VM goes into its cloud's {{ cfg.tiers[cfg.default_tier].label }} job by default.</li>
-      <li>SCVMM custom property <b>{{ cfg.classification.custom_property }}</b> set to {{ cfg.classification.large_values|join(', ') }}, or tag {{ cfg.classification.large_tags|join(', ') }}, moves it to the {{ cfg.tiers['large'].label }} job{% if cfg.retier.remap_backups %} with its existing restore points{% endif %}.</li>
-      <li>Moving up is {{ 'automatic' if cfg.retier.auto_upgrade else 'held for approval' }}. Moving down is {{ 'automatic' if cfg.retier.auto_downgrade else 'held for approval' }}.</li>
-      {% if cfg.classification.exclude_values or cfg.classification.exclude_tags %}<li>Excluded: {{ (cfg.classification.exclude_values + cfg.classification.exclude_tags)|join(', ') }}.</li>{% else %}<li>No exclusions: every cloud VM is backed up.</li>{% endif %}
-      {% if cfg.classification.large_disk_threshold_gb %}<li>Also large data: {{ cfg.classification.disk_size_basis }} disk size of {{ cfg.classification.large_disk_threshold_gb }} GB or more.</li>{% endif %}
+      <li>SCVMM custom property <b>{{ cfg.classification.custom_property }}</b> on the VM holds its retention in days, for example 7, 45 or 400. Any whole number above 0 is used exactly as given.</li>
+      <li>Blank, missing or anything else: {{ cfg.default_retention_days }} days.</li>
+      <li>Each distinct retention is its own job per cloud. Raising a VM's retention moves it {% if cfg.retier.remap_backups %}and its restore points {% endif %}automatically{% if not cfg.retier.auto_upgrade %} after approval{% endif %}. Lowering it {{ 'also happens automatically' if cfg.retier.auto_downgrade else 'waits for approval, because it shortens how long backups are kept' }}.</li>
     </ul>
   </div>
   <div class="panel">
-    <h3>Tiers</h3>
-    <ul class="arrows">{% for k, t in cfg.tiers.items() %}<li><b>{{ t.label }}</b>: {{ t.retention_days }} days{% if t.repository %} on {{ t.repository }}{% endif %}</li>{% endfor %}</ul>
+    <h3>Repositories</h3>
+    <ul class="arrows"><li>Default: {{ cfg.default_repository }}</li>{% for d, r in cfg.retention_repositories.items() %}<li>{{ d }} days: {{ r }}</li>{% endfor %}{% for c, r in cfg.cloud_repositories.items() %}<li>{{ c }}: {{ r }}</li>{% endfor %}</ul>
     <h3 style="margin-top:14px">Backup copy</h3>
     <ul class="arrows">{% if cfg.backup_copy.enabled %}<li>{{ cfg.backup_copy.mode }} copy of every managed job to <b>{{ cfg.backup_copy.target_repository or 'not set' }}</b>, {{ cfg.backup_copy.retention_days }} days</li>{% else %}<li>Off</li>{% endif %}</ul>
     <h3 style="margin-top:14px">Remote hosts</h3>

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Backup coverage<span class="dot">.</span></h1>
-<p class="lede">Every VM in every SCVMM cloud is backed up on {{ cfg.tiers['standard'].retention_days }}-day retention unless it is marked LargeData, which moves it, and its restore points, to the cloud's {{ cfg.tiers['large'].retention_days }}-day job.{% if cfg.backup_copy.enabled %} Each job gets a {{ cfg.backup_copy.retention_days }}-day backup copy job to {{ cfg.backup_copy.target_repository or 'a separate repository' }}.{% endif %} VMware, Nutanix and hand-built jobs are never changed.</p>
+<p class="lede">Every VM in every SCVMM cloud is backed up for the number of days in its {{ cfg.classification.custom_property }} custom property, or {{ cfg.default_retention_days }} days if it is blank or not a number. Each retention gets its own job per cloud, and restore points move with the VM when its retention changes.{% if cfg.backup_copy.enabled %} Each job gets a {{ cfg.backup_copy.retention_days }}-day backup copy job to {{ cfg.backup_copy.target_repository or 'a separate repository' }}.{% endif %} VMware, Nutanix and hand-built jobs are never changed.</p>
 
 <div class="actions-row">
   <form class="inline" method="post" action="/actions/run"><input type="hidden" name="mode" value="plan">
@@ -40,22 +40,20 @@
 
   <h2>Clouds</h2>
   <div class="tablewrap"><table>
-    <thead><tr><th>Cloud</th><th class="num">VMs</th><th class="num">Large</th><th class="num">Standard</th><th class="num">To add</th><th class="num">Moving</th>
-      <th>{{ cfg.tiers['large'].label }} job</th><th>{{ cfg.tiers['standard'].label }} job</th></tr></thead>
+    <thead><tr><th>Cloud</th><th class="num">VMs</th><th>VMs by retention</th><th class="num">To add</th><th class="num">Moving</th>
+      <th>Jobs</th></tr></thead>
     <tbody>
     {% for c in clouds %}
       <tr>
         <td><a href="/clouds/{{ c.id }}"><b>{{ c.name }}</b></a></td>
-        <td class="num">{{ c.vms }}</td><td class="num">{{ c.large }}</td><td class="num">{{ c.standard }}</td>
+        <td class="num">{{ c.vms }}</td>
+        <td>{% for t in c.tier_keys if c.tiers.get(t) %}<span class="tag {{ 'large' if cfg.tiers[t].retention_days > cfg.tiers[cfg.default_tier].retention_days else 'standard' }}">{{ cfg.tiers[t].retention_days }}d</span> {{ c.tiers[t] }}{% if not loop.last %}&nbsp; {% endif %}{% endfor %}</td>
         <td class="num">{% if c.pending %}<span class="pill warn">{{ c.pending }}</span>{% else %}0{% endif %}</td>
         <td class="num">{% if c.moving %}<span class="pill warn">{{ c.moving }}</span>{% else %}0{% endif %}</td>
-        {% for t in ['large', 'standard'] %}
-          {% set j = c.jobs.get(t) %}
-          {% set cp = c.copies.get(t) %}
-          <td>{% if j %}{{ j.name }} <span class="muted">{{ j.start_time or 'no time' }}</span>{% if j.planned %} <span class="pill warn">planned</span>{% endif %}
-              {% if cfg.backup_copy.enabled %}<div class="small muted">{% if cp %}Copy: {{ cp.name }}{% if cp.planned %} (planned){% endif %}{% else %}No copy job yet{% endif %}</div>{% endif %}
-              {% else %}<span class="muted">none needed</span>{% endif %}</td>
-        {% endfor %}
+        <td>{% for t in c.tier_keys %}{% set j = c.jobs.get(t) %}{% set cp = c.copies.get(t) %}
+            {% if j %}<div>{{ j.name }} <span class="muted">{{ j.start_time or 'no time' }}</span>{% if j.planned %} <span class="pill warn">planned</span>{% endif %}
+              {% if cfg.backup_copy.enabled %}<div class="small muted">{% if cp %}Copy: {{ cp.name }}{% if cp.planned %} (planned){% endif %}{% else %}No copy job yet{% endif %}</div>{% endif %}</div>{% endif %}
+            {% endfor %}</td>
       </tr>
     {% endfor %}
     </tbody>

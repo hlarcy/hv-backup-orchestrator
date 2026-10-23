@@ -8,7 +8,9 @@ services:
     container_name: hvbo
     restart: unless-stopped
     ports:
-      - "8080:8080"          # put a TLS reverse proxy in front for anything beyond a management VLAN
+      # No login in the app: only the authenticating reverse proxy may reach this port.
+      # If the proxy runs on this Docker host, bind to loopback: "127.0.0.1:8080:8080".
+      - "8080:8080"
     env_file: .env
     environment:
       TZ: Europe/London      # job start times are VBR-server local; keep the UI clock aligned

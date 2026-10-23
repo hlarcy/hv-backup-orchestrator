@@ -5,8 +5,7 @@ Automates Veeam Backup & Replication 13.1 job creation and scheduling for a mult
 ## What it does
 
 - Reads every SCVMM cloud and the VMs inside it.
-- Puts every cloud VM into its cloud's 30-day job (`HVBO <cloud> Standard 30d`). There are no exclusions by default.
-- When a VM is marked LargeData (SCVMM custom property `BackupTier=LargeData` or tag `LargeData`), moves it to the cloud's 90-day job (`HVBO <cloud> LargeData 90d`), creating that job if needed, and moves the VM's existing restore points with it.
+- Reads each VM's retention from its SCVMM custom property `BackupTier` (a number of days; 30 if blank or not a number) and keeps one job per retention per cloud, e.g. `HVBO <cloud> 30d` and `HVBO <cloud> 180d`. When the number changes, the VM and its existing restore points move to the matching job.
 - Gives every managed backup job a backup copy job (`<job> Copy`) to a separate repository or SOBR, keeping 7 days. Configurable.
 - On each sync (default hourly), picks up new VMs and tag changes.
 - Gives every managed job its own daily start time between 18:00 and 00:00, 3 minutes apart (120 slots). Slots are sticky, and minutes already used by any other job on the server (VMware, Nutanix, hand-built) are skipped.
@@ -24,7 +23,7 @@ The VBR server also protects live VMware and Nutanix estates. The tool is built 
 5. Nothing destructive. The tool never deletes, disables, starts or stops a job, and never changes a global or server setting. The only removal is taking a VM out of one of its own jobs after a tier move.
 6. Other jobs are read for two things only: their names (so new names never collide) and their daily start times (so managed jobs never start in the same 3 minutes). The Isolation page lists them all as read only.
 
-Hand-built Hyper-V jobs are treated the same way: VMs in them count as backed up (unless `coverage_mode: managed_only`), but the jobs are never changed. A VM in a hand-built job that is marked LargeData also goes into its cloud's 90-day job; the hand-built job is left as it is.
+Hand-built Hyper-V jobs are treated the same way: VMs in them count as backed up (unless `coverage_mode: managed_only`), but the jobs are never changed. A VM in a hand-built job whose BackupTier asks for a non-default retention also goes into its cloud's job for that retention; the hand-built job is left as it is.
 
 Shared repositories are the one indirect effect: new Hyper-V and copy jobs add load to whatever repositories and SOBRs you point them at. Point `default_repository` and `backup_copy.target_repository` at Hyper-V tenant storage, not at repositories sized for the VMware or Nutanix estates.
 
@@ -43,26 +42,31 @@ The container never needs Windows. PowerShell scripts live in `app/ps/`, are sen
 
 The VBR REST API was not used because job creation for Hyper-V is still more complete in the Veeam PowerShell module. SCVMM has no REST API, so PSRP is needed for it anyway.
 
-## How a VM is tiered
+## How retention is set
 
-- Default: 30 days. Size, role and name do not matter.
-- 90 days: SCVMM custom property `BackupTier` set to `LargeData`, or SCVMM tag `LargeData`. Create the property once with `New-SCCustomProperty -Name BackupTier -AddMember @("VM")`.
-- Exclusions are off. `exclude_values` and `exclude_tags` exist in the config if ever needed; empty means every cloud VM is backed up.
+One SCVMM custom property on the VM, `BackupTier`, holds its retention in days. Create it once with `New-SCCustomProperty -Name BackupTier -AddMember @("VM")`.
 
-### Tier moves and restore points
+| `BackupTier` value | Retention |
+|---|---|
+| A whole number above 0, e.g. `7`, `45`, `180`, `400` | Exactly that many days, shorter or longer than the default |
+| Blank, missing, or anything else (`0`, `12.5`, `180 days`, text) | `default_retention_days` (30) |
 
-When LargeData appears on a VM in its cloud's 30-day job, the next sync (automatic by default, `retier.auto_upgrade`):
+Each distinct retention gets its own job per cloud (for example `HVBO Murrays Hall 180d`), with its own start slot and copy job. Size, role and name do not matter, and no VM can opt out.
 
-1. creates the 90-day job and its copy job if the cloud does not have them yet;
-2. moves the VM's restore points from the 30-day job's backup into the 90-day job with `Move-VBRBackup -Backup <30d backup> -Name <vm> -Job <90d job>`, so they follow 90-day retention from then on;
-3. makes sure the VM is in the 90-day job;
-4. removes the VM from the 30-day job, only once no restore points are left behind there.
+### Retention changes and restore points
+
+When a VM's retention changes (for example its BackupTier goes from blank to 180), the next sync (automatic by default, `retier.auto_upgrade`):
+
+1. creates the longer job and its copy job if the cloud does not have them yet;
+2. moves the VM's restore points into the new job with `Move-VBRBackup -Backup <old backup> -Name <vm> -Job <new job>`, so they follow the new retention from then on;
+3. makes sure the VM is in the new job;
+4. removes the VM from the old job, only once no restore points are left behind there.
 
 If both jobs use the same repository the move is quick and finishes in the same run. If they use different repositories the data has to be copied, so the move runs in the background and the VM stays in both jobs until it finishes; the next sync completes the hand-over. If a move fails (for example because a job is running), the VM stays in both jobs and the move is retried next sync, so it is never left without a backup.
 
 Per-VM moves need per-machine backup files, the default for new repositories and SOBRs since VBR 12. Check the tenant repositories use them.
 
-Removing LargeData would shorten retention, so the move back to 30 days waits for approval on the Plan page (`retier.auto_downgrade: false`). VMs that move to a different SCVMM cloud also wait for approval.
+Lowering retention (180 to 90, or clearing the property) shortens how long existing backups are kept, so by default it waits for approval on the Plan page. Set `retier.auto_downgrade: true` to apply it automatically. VMs that move to a different SCVMM cloud also wait for approval.
 
 ### Backup copy jobs
 
@@ -73,7 +77,7 @@ With `backup_copy.enabled: true`, each managed backup job, new or existing, gets
 - refused if no target is configured, or if the target is the source job's own repository;
 - the copy job follows its backup job, so VMs added or moved are picked up automatically.
 
-Copy jobs are only created for the tool's own jobs, never for VMware, Nutanix or hand-built jobs. When a VM moves to the 90-day job, its copies in the 30-day copy chain age out after 7 days and new copies come from the 90-day job.
+Copy jobs are only created for the tool's own jobs, never for VMware, Nutanix or hand-built jobs. When a VM moves job, its copies in the old copy chain age out after 7 days and new copies come from the new job.
 
 ## How "already backed up" is decided
 
@@ -133,16 +137,25 @@ SCVMM's `VirtualMachineManager` module needs Windows PowerShell 5.1, so leave SC
 
 Add the SCVMM server (or the Hyper-V failover cluster) to VBR's managed servers and rescan. VMs are resolved with `Find-VBRHvEntity`; a VM VBR cannot see is reported on the run page and skipped.
 
+## Access
+
+The app has no login of its own. It is meant to sit behind a reverse proxy that authenticates users, so:
+
+- make sure only the proxy can reach port 8080 (firewall it, put it on an internal Docker network, or bind it to `127.0.0.1` when the proxy runs on the same host);
+- anyone who gets past the proxy can apply changes to VBR, so restrict the proxy to the people who should;
+- if the proxy passes the signed-in user in `X-Forwarded-User`, `Remote-User`, `X-Auth-Request-User` or `X-Forwarded-Email`, it is recorded against each manual run;
+- form posts are refused unless they come from the app's own pages (matching `Host` or `X-Forwarded-Host`), so another website cannot use a signed-in browser to trigger an apply.
+
 ## Install
 
 ```bash
 cd hv-backup-orchestrator
 cp config/config.example.yaml config/config.yaml   # set hosts, repository, rules
-cp .env.example .env                                # set UI login and service account passwords
+cp .env.example .env                                # set the service account passwords
 docker compose up -d --build
 ```
 
-Open `http://<docker-host>:8080`, sign in, then:
+Open the app through your reverse proxy, then:
 
 1. Diagnostics: run the connection test. Check that `sample_vm.refs` contains a GUID that matches the VM's `VMId` in SCVMM. That confirms tenant-safe matching on your build.
 2. Overview: Discover and plan. Nothing is changed in VBR.
@@ -164,7 +177,7 @@ Try the UI without any infrastructure: set `HVBO_MOCK=true` in `.env`. The mock 
 
 These scripts were written against the documented VBR 12/13 PowerShell object model and could not be run against a live 13.1 server while building. Before enabling auto-apply, use the Diagnostics page and one manual apply to confirm:
 
-- `Move-VBRBackup -Name <vm> -Job <90d job>` on a test VM: confirm the restore points appear under the 90-day job and the VM is then removed from the 30-day job.
+- `Move-VBRBackup` on a test VM: set its BackupTier to a new number and confirm its restore points appear under the new job and the VM is then removed from the old one.
 - `Add-VBRBackupCopyJob` creates the copy job with 7 days on the copy SOBR (the run page shows the read-back).
 - The Isolation page lists your VMware and Nutanix jobs. If one is missing it is still never changed (only marked jobs are), but its start time will not be avoided.
 - `Get-VBRJobObject` exposes the VM GUID in one of the probed properties (`app/ps/vbr_common.ps1`, `Get-HvboRefs`). If it does not, matching falls back to unique names and the run log will say so.
@@ -177,7 +190,7 @@ These scripts were written against the documented VBR 12/13 PowerShell object mo
 pip install -r requirements-dev.txt
 pytest -q
 HVBO_MOCK=true HVBO_CONFIG=config/config.example.yaml HVBO_DATA_DIR=./data \
-  HVBO_UI_USER=admin HVBO_UI_PASSWORD=admin uvicorn app.main:app --reload --port 8080
+  uvicorn app.main:app --reload --port 8080
 ```
 
 | Path | Purpose |

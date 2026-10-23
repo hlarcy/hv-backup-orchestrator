@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import os
-import secrets
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,7 +11,6 @@ from urllib.parse import urlparse
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -30,10 +28,6 @@ store = Store(cfg.data_dir)
 engine = Engine(cfg, store)
 scheduler = BackgroundScheduler(timezone=os.environ.get("TZ", "Europe/London"))
 
-if not cfg.auth_disabled and not (cfg.ui_user and cfg.ui_password):
-    raise SystemExit("Set HVBO_UI_USER and HVBO_UI_PASSWORD (or HVBO_AUTH_DISABLED=true behind your own SSO proxy).")
-
-
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     scheduler.add_job(engine.scheduled_tick, "interval", minutes=cfg.sync_interval_minutes, id="sync",
@@ -48,21 +42,29 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="HV Backup Orchestrator", lifespan=lifespan, docs_url="/api/docs", redoc_url=None)
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 templates = Jinja2Templates(directory=BASE / "templates")
-security = HTTPBasic(auto_error=False)
+# No authentication here: the app is published only through a reverse proxy that authenticates users.
+# The proxy's user header, if present, is recorded against manual runs.
+USER_HEADERS = ("x-forwarded-user", "x-remote-user", "remote-user", "x-auth-request-user",
+                "x-forwarded-preferred-username", "x-forwarded-email", "x-auth-request-email")
 
 
-def auth(request: Request, creds: HTTPBasicCredentials | None = Depends(security)) -> str:
-    if cfg.auth_disabled:
-        return "anonymous"
-    ok = creds and secrets.compare_digest(creds.username.encode(), (cfg.ui_user or "").encode()) \
-        and secrets.compare_digest(creds.password.encode(), (cfg.ui_password or "").encode())
-    if not ok:
-        raise HTTPException(401, "Authentication required", headers={"WWW-Authenticate": 'Basic realm="HVBO"'})
-    if request.method == "POST":  # basic CSRF guard: form posts must come from this site
+def who(request: Request) -> str:
+    """Caller as reported by the reverse proxy (for the run history), and a same-site check on posts.
+
+    The proxy's session is usually a cookie, so a page on another site could otherwise make a
+    signed-in browser submit 'apply'. Posts must come from this site's own pages.
+    """
+    if request.method == "POST":
         src = request.headers.get("origin") or request.headers.get("referer")
-        if src and urlparse(src).netloc != request.headers.get("host"):
-            raise HTTPException(403, "Cross-site request refused")
-    return creds.username
+        if src:
+            this_site = {h.strip().lower() for h in (request.headers.get("x-forwarded-host") or "").split(",") if h.strip()}
+            this_site.add((request.headers.get("host") or "").lower())
+            if urlparse(src).netloc.lower() not in this_site:
+                raise HTTPException(403, "Cross-site request refused")
+    for h in USER_HEADERS:
+        if request.headers.get(h):
+            return request.headers[h][:120]
+    return "web"
 
 
 def next_run() -> str | None:
@@ -91,7 +93,7 @@ templates.env.globals["STATUS_LABEL"] = STATUS_LABEL
 def cloud_rows(plan: dict) -> list[dict]:
     rows: dict[str, dict] = {}
     for c in plan["inventory"]["clouds"]:
-        rows[c["id"]] = {"id": c["id"], "name": c["name"], "vms": 0, "large": 0, "standard": 0,
+        rows[c["id"]] = {"id": c["id"], "name": c["name"], "vms": 0, "tiers": {},
                          "excluded": 0, "pending": 0, "protected": 0, "moving": 0, "jobs": {}, "copies": {}}
     for v in plan["vm_status"]:
         r = rows.get(v["cloud_id"])
@@ -100,8 +102,8 @@ def cloud_rows(plan: dict) -> list[dict]:
         r["vms"] += 1
         if v["status"] == "excluded":
             r["excluded"] += 1
-        elif v["tier"] in ("large", "standard"):
-            r[v["tier"]] += 1
+        elif v["tier"] in cfg.tiers:
+            r["tiers"][v["tier"]] = r["tiers"].get(v["tier"], 0) + 1
         if v["status"] == "pending":
             r["pending"] += 1
         if v["status"] == "protected":
@@ -130,20 +132,22 @@ def cloud_rows(plan: dict) -> list[dict]:
                                                                 "repository": a["repository"],
                                                                 "retention_days": a["retention_days"],
                                                                 "blocked": a.get("blocked")})
+    for r in rows.values():
+        r["tier_keys"] = cfg.tiers_by_retention(set(r["tiers"]) | set(r["jobs"]))
     return sorted(rows.values(), key=lambda r: r["name"].lower())
 
 
 # --------------------------------------------------------------------------- pages
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request, user: str = Depends(auth)):
+def dashboard(request: Request, user: str = Depends(who)):
     c = ctx(request)
     return templates.TemplateResponse(request, "dashboard.html", {
         **c, "runs": store.runs(8), "clouds": cloud_rows(c["plan"]) if c["plan"] else []})
 
 
 @app.get("/clouds/{cloud_id}", response_class=HTMLResponse)
-def cloud_detail(cloud_id: str, request: Request, user: str = Depends(auth)):
+def cloud_detail(cloud_id: str, request: Request, user: str = Depends(who)):
     c = ctx(request)
     if not c["plan"]:
         return RedirectResponse("/", 303)
@@ -156,12 +160,12 @@ def cloud_detail(cloud_id: str, request: Request, user: str = Depends(auth)):
 
 
 @app.get("/plan", response_class=HTMLResponse)
-def plan_page(request: Request, user: str = Depends(auth)):
+def plan_page(request: Request, user: str = Depends(who)):
     return templates.TemplateResponse(request, "plan.html", ctx(request))
 
 
 @app.get("/schedule", response_class=HTMLResponse)
-def schedule_page(request: Request, user: str = Depends(auth)):
+def schedule_page(request: Request, user: str = Depends(who)):
     c = ctx(request)
     hours = defaultdict(list)
     for s in (c["plan"] or {}).get("timeline", []):
@@ -170,12 +174,12 @@ def schedule_page(request: Request, user: str = Depends(auth)):
 
 
 @app.get("/runs", response_class=HTMLResponse)
-def runs_page(request: Request, user: str = Depends(auth)):
+def runs_page(request: Request, user: str = Depends(who)):
     return templates.TemplateResponse(request, "runs.html", {**ctx(request), "runs": store.runs(200)})
 
 
 @app.get("/runs/{run_id}", response_class=HTMLResponse)
-def run_page(run_id: int, request: Request, user: str = Depends(auth)):
+def run_page(run_id: int, request: Request, user: str = Depends(who)):
     run = store.run(run_id)
     if not run:
         raise HTTPException(404)
@@ -183,12 +187,12 @@ def run_page(run_id: int, request: Request, user: str = Depends(auth)):
 
 
 @app.get("/diagnostics", response_class=HTMLResponse)
-def diagnostics(request: Request, user: str = Depends(auth)):
+def diagnostics(request: Request, user: str = Depends(who)):
     return templates.TemplateResponse(request, "diagnostics.html", {**ctx(request), "probe": store.get("last_probe")})
 
 
 @app.get("/safety", response_class=HTMLResponse)
-def safety_page(request: Request, user: str = Depends(auth)):
+def safety_page(request: Request, user: str = Depends(who)):
     c = ctx(request)
     inv = (c["plan"] or {}).get("inventory", {})
     hand_built = [j for j in inv.get("jobs", []) if not j.get("managed_key")]
@@ -197,7 +201,7 @@ def safety_page(request: Request, user: str = Depends(auth)):
 
 
 @app.get("/settings", response_class=HTMLResponse)
-def settings_page(request: Request, user: str = Depends(auth)):
+def settings_page(request: Request, user: str = Depends(who)):
     import yaml
     return templates.TemplateResponse(request, "settings.html", {
         **ctx(request), "config_yaml": yaml.safe_dump(cfg.redacted(), sort_keys=False)})
@@ -206,7 +210,7 @@ def settings_page(request: Request, user: str = Depends(auth)):
 # --------------------------------------------------------------------------- actions
 
 @app.post("/actions/run")
-def action_run(mode: str = Form(...), user: str = Depends(auth)):
+def action_run(mode: str = Form(...), user: str = Depends(who)):
     if mode not in ("plan", "apply", "rebalance"):
         raise HTTPException(400)
     run_id = engine.start(f"manual:{user}", "plan" if mode == "rebalance" else mode, rebalance=(mode == "rebalance"))
@@ -214,13 +218,13 @@ def action_run(mode: str = Form(...), user: str = Depends(auth)):
 
 
 @app.post("/actions/apply-plan")
-def action_apply_plan(run_id: int = Form(...), include_manual: bool = Form(False), user: str = Depends(auth)):
+def action_apply_plan(run_id: int = Form(...), include_manual: bool = Form(False), user: str = Depends(who)):
     new_id = engine.start(f"manual:{user}", "apply_stored", from_run=run_id, include_manual=include_manual)
     return RedirectResponse(f"/runs/{new_id}" if new_id else "/?busy=1", 303)
 
 
 @app.post("/actions/toggle")
-def action_toggle(key: str = Form(...), user: str = Depends(auth)):
+def action_toggle(key: str = Form(...), user: str = Depends(who)):
     if key == "auto_apply":
         store.set("auto_apply", not engine.auto_apply)
     elif key == "paused":
@@ -232,7 +236,7 @@ def action_toggle(key: str = Form(...), user: str = Depends(auth)):
 
 
 @app.post("/actions/probe")
-def action_probe(user: str = Depends(auth)):
+def action_probe(user: str = Depends(who)):
     from .db import now
     store.set("last_probe", {"at": now(), "result": engine.backend.probe()})
     return RedirectResponse("/diagnostics", 303)
@@ -241,7 +245,7 @@ def action_probe(user: str = Depends(auth)):
 # --------------------------------------------------------------------------- JSON API
 
 @app.get("/api/status")
-def api_status(user: str = Depends(auth)):
+def api_status(user: str = Depends(who)):
     latest = store.latest_with_plan()
     return {"busy": engine.busy, "current_run": engine.current_run, "auto_apply": engine.auto_apply,
             "paused": engine.paused, "next_run": next_run(), "backend": engine.backend.name,
@@ -249,7 +253,7 @@ def api_status(user: str = Depends(auth)):
 
 
 @app.get("/api/runs/{run_id}")
-def api_run(run_id: int, user: str = Depends(auth)):
+def api_run(run_id: int, user: str = Depends(who)):
     run = store.run(run_id)
     if not run:
         raise HTTPException(404)
@@ -257,7 +261,7 @@ def api_run(run_id: int, user: str = Depends(auth)):
 
 
 @app.get("/api/plan")
-def api_plan(user: str = Depends(auth)):
+def api_plan(user: str = Depends(who)):
     latest = store.latest_with_plan()
     return latest["plan"] if latest else {}
 
