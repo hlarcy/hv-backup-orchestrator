@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Backup coverage<span class="dot">.</span></h1>
+<p class="lede">Every VM in every SCVMM cloud is backed up on {{ cfg.tiers['standard'].retention_days }}-day retention unless it is marked LargeData, which moves it, and its restore points, to the cloud's {{ cfg.tiers['large'].retention_days }}-day job.{% if cfg.backup_copy.enabled %} Each job gets a {{ cfg.backup_copy.retention_days }}-day backup copy job to {{ cfg.backup_copy.target_repository or 'a separate repository' }}.{% endif %} VMware, Nutanix and hand-built jobs are never changed.</p>
+
+<div class="actions-row">
+  <form class="inline" method="post" action="/actions/run"><input type="hidden" name="mode" value="plan">
+    <button class="btn" {{ 'disabled' if busy }}>Discover and plan</button></form>
+  <form class="inline" method="post" action="/actions/run" onsubmit="return confirm('Discover and apply all automatic actions to VBR now?')"><input type="hidden" name="mode" value="apply">
+    <button class="btn accent" {{ 'disabled' if busy }}>Discover and apply</button></form>
+  <span class="right"></span>
+  <form class="inline" method="post" action="/actions/toggle"><input type="hidden" name="key" value="auto_apply">
+    <button class="btn ghost">{{ 'Turn auto-apply off' if auto_apply else 'Turn auto-apply on' }}</button></form>
+  <form class="inline" method="post" action="/actions/toggle"><input type="hidden" name="key" value="paused">
+    <button class="btn ghost">{{ 'Resume schedule' if paused else 'Pause schedule' }}</button></form>
+</div>
+{% if request.query_params.get('busy') %}<div class="warnbox">A run is already in progress.</div>{% endif %}
+
+{% if not plan %}
+  <h2>No data yet</h2>
+  <div class="panel"><p>Run <b>Discover and plan</b> to read SCVMM and Veeam. Nothing is changed in VBR by a plan run.</p></div>
+{% else %}
+  {% set s = plan.summary %}
+  <h2>Estate</h2>
+  <div class="tiles">
+    <div class="tile"><div class="k">Clouds</div><div class="v">{{ s.clouds }}</div></div>
+    <div class="tile"><div class="k">Cloud VMs</div><div class="v">{{ s.vms }}</div></div>
+    <div class="tile"><div class="k">Protected</div><div class="v">{{ s.status.get('protected', 0) }}</div></div>
+    <div class="tile dark"><div class="k">Waiting to be added</div><div class="v">{{ s.status.get('pending', 0) }}</div></div>
+    <div class="tile"><div class="k">Moving to 90 days</div><div class="v">{{ s.status.get('retier', 0) }}</div></div>
+    <div class="tile"><div class="k">Managed jobs</div><div class="v">{{ s.managed_jobs }}</div></div>
+    <div class="tile"><div class="k">Managed copy jobs</div><div class="v">{{ s.get('copy_jobs', 0) }}</div></div>
+    <div class="tile"><div class="k">Other jobs, never touched</div><div class="v"><a href="/safety">{{ s.get('foreign_jobs', 0) + s.get('unmanaged_hyperv_jobs', 0) }}</a></div></div>
+    <div class="tile"><div class="k">Start slots used</div><div class="v">{{ plan.window.used }}<span class="muted small"> / {{ plan.window.capacity }}</span></div></div>
+  </div>
+  <p class="small muted">Data from run <a href="/runs/{{ latest.id }}">#{{ latest.id }}</a>, planned {{ plan.generated_at }} UTC.
+    {% if plan.actions %}<a href="/plan">{{ plan.actions|length }} pending action(s)</a>.{% endif %}</p>
+
+  {% if plan.warnings %}<div class="warnbox"><b>{{ plan.warnings|length }} warning(s)</b><ul class="arrows">{% for w in plan.warnings[:6] %}<li>{{ w }}</li>{% endfor %}</ul></div>{% endif %}
+
+  <h2>Clouds</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Cloud</th><th class="num">VMs</th><th class="num">Large</th><th class="num">Standard</th><th class="num">To add</th><th class="num">Moving</th>
+      <th>{{ cfg.tiers['large'].label }} job</th><th>{{ cfg.tiers['standard'].label }} job</th></tr></thead>
+    <tbody>
+    {% for c in clouds %}
+      <tr>
+        <td><a href="/clouds/{{ c.id }}"><b>{{ c.name }}</b></a></td>
+        <td class="num">{{ c.vms }}</td><td class="num">{{ c.large }}</td><td class="num">{{ c.standard }}</td>
+        <td class="num">{% if c.pending %}<span class="pill warn">{{ c.pending }}</span>{% else %}0{% endif %}</td>
+        <td class="num">{% if c.moving %}<span class="pill warn">{{ c.moving }}</span>{% else %}0{% endif %}</td>
+        {% for t in ['large', 'standard'] %}
+          {% set j = c.jobs.get(t) %}
+          {% set cp = c.copies.get(t) %}
+          <td>{% if j %}{{ j.name }} <span class="muted">{{ j.start_time or 'no time' }}</span>{% if j.planned %} <span class="pill warn">planned</span>{% endif %}
+              {% if cfg.backup_copy.enabled %}<div class="small muted">{% if cp %}Copy: {{ cp.name }}{% if cp.planned %} (planned){% endif %}{% else %}No copy job yet{% endif %}</div>{% endif %}
+              {% else %}<span class="muted">none needed</span>{% endif %}</td>
+        {% endfor %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+{% endif %}
+
+<h2>Recent runs</h2>
+{% include "_runs_table.html" %}
+{% endblock %}

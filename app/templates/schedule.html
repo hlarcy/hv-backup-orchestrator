@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Start schedule<span class="dot">.</span></h1>
+<p class="lede">Each managed job owns one {{ cfg.schedule.stagger_minutes }}-minute start slot between {{ cfg.schedule.window_start }} and {{ cfg.schedule.window_end }}. Slots are sticky, so a new tenant takes the next free slot and nobody else moves. Start times held by jobs this app does not manage are reserved.</p>
+{% if not plan %}<p>No plan yet.</p>{% else %}
+<div class="actions-row">
+  <form class="inline" method="post" action="/actions/run" onsubmit="return confirm('Plan a rebalance? Nothing changes until you apply the plan.')">
+    <input type="hidden" name="mode" value="rebalance">
+    <button class="btn ghost" {{ 'disabled' if busy }}>Plan a rebalance ({{ cfg.schedule.order|replace('_', ' ') }})</button></form>
+  <span class="muted small">{{ plan.window.used }} of {{ plan.window.capacity }} slots used, {{ plan.window.reserved }} reserved.</span>
+</div>
+<div class="legend">
+  <span><i style="background:#302A32"></i>Managed job</span>
+  <span><i style="background:#302A32;box-shadow:inset 0 -4px 0 #14F2AF"></i>Managed, large data</span>
+  <span><i style="border:2px dashed #302A32"></i>Planned new job</span>
+  <span><i style="background:#E6E3E8;background-image:repeating-linear-gradient(45deg,transparent 0 3px,#cfcad3 3px 5px)"></i>Reserved (other job)</span>
+  <span><i style="background:#F3F8FF;border:1px solid #E3E6EE"></i>Free</span>
+</div>
+<div class="timeline">
+  {% for h, slots in hours.items() %}
+  <div class="hourrow"><div class="h">{{ h }}:00</div>
+    <div class="slots">
+      {% for s in slots %}<div class="slot {{ s.state }} {{ s.tier or '' }}" title="{{ s.time }}{% if s.job_name %}: {{ s.job_name }}{% endif %}"></div>{% endfor %}
+    </div></div>
+  {% endfor %}
+</div>
+
+<h2>Assigned start times</h2>
+<div class="tablewrap"><table>
+  <thead><tr><th>Start</th><th>Job</th><th>Cloud</th><th>Tier</th><th>State</th></tr></thead>
+  <tbody>
+  {% for s in plan.timeline if s.state != 'free' %}
+    <tr><td><b>{{ s.time }}</b></td><td>{{ s.job_name }}</td><td>{{ s.cloud_name or '' }}</td>
+      <td>{% if s.tier %}<span class="tag {{ s.tier }}">{{ cfg.tiers[s.tier].label if s.tier in cfg.tiers else s.tier }}</span>{% endif %}</td>
+      <td>{{ {'managed': 'Managed', 'planned': 'Planned', 'reserved': 'Reserved'}[s.state] }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endif %}
+{% endblock %}

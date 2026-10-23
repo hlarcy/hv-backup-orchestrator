@@ -1,0 +1,19 @@
+<div class="tablewrap"><table>
+  <thead><tr><th>Run</th><th>Started (UTC)</th><th>Trigger</th><th>Mode</th><th>Status</th><th class="num">Actions</th><th class="num">Applied</th><th class="num">Failed</th></tr></thead>
+  <tbody>
+  {% for r in runs %}
+    {% set st = r.status %}
+    <tr>
+      <td><a href="/runs/{{ r.id }}">#{{ r.id }}</a></td>
+      <td>{{ r.started[:19]|replace('T', ' ') }}</td>
+      <td>{{ r.trigger }}</td><td>{{ r.mode|replace('_', ' ') }}</td>
+      <td><span class="pill {{ 'ok' if st in ('applied', 'planned', 'no_changes') else ('bad' if st == 'failed' else 'warn') }}">{{ st|replace('_', ' ') }}</span></td>
+      <td class="num">{{ (r.summary or {}).get('actions', '') }}</td>
+      <td class="num">{{ (r.summary or {}).get('applied', '') }}</td>
+      <td class="num">{{ (r.summary or {}).get('failed', '') }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="8" class="muted">No runs yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>

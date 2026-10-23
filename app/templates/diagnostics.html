@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Diagnostics<span class="dot">.</span></h1>
+<p class="lede">Tests PowerShell remoting to SCVMM and VBR and shows how this Veeam version exposes VM identifiers. Run it once after deployment and check that <b>refs</b> on the sample VM contains the Hyper-V VM GUID, which is how VMs are matched across tenants with the same VM names.</p>
+<form method="post" action="/actions/probe"><button class="btn">Run connection test</button></form>
+{% if probe %}
+  <p class="small muted">Last test {{ probe.at }} UTC.</p>
+  <div class="grid2">
+  {% for k in ['scvmm', 'vbr'] %}
+    {% set r = probe.result.get(k, {}) %}
+    <div class="panel"><h3>{{ 'SCVMM' if k == 'scvmm' else 'Veeam Backup & Replication' }} <span class="pill {{ 'ok' if r.ok else 'bad' }}">{{ 'Connected' if r.ok else 'Failed' }}</span></h3>
+      {% if r.ok %}<pre class="log">{{ r.data|tojson(indent=2) }}</pre>{% else %}<div class="errbox">{{ r.error }}</div>{% endif %}
+    </div>
+  {% endfor %}
+  </div>
+{% endif %}
+{% endblock %}

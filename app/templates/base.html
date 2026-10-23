@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}HV Backup Orchestrator{% endblock %}</title>
+  {% if busy %}<meta http-equiv="refresh" content="4">{% endif %}
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="bar">
+    <img src="/static/arc-logo-light.svg" alt="Arc">
+    <span class="product">Hyper-V backup orchestrator</span>
+    {% set path = request.url.path %}
+    <nav>
+      <a href="/" class="{{ 'active' if path == '/' or path.startswith('/clouds') }}">Overview</a>
+      <a href="/plan" class="{{ 'active' if path == '/plan' }}">Plan</a>
+      <a href="/schedule" class="{{ 'active' if path == '/schedule' }}">Schedule</a>
+      <a href="/runs" class="{{ 'active' if path.startswith('/runs') }}">Runs</a>
+      <a href="/safety" class="{{ 'active' if path == '/safety' }}">Isolation</a>
+      <a href="/diagnostics" class="{{ 'active' if path == '/diagnostics' }}">Diagnostics</a>
+      <a href="/settings" class="{{ 'active' if path == '/settings' }}">Settings</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <div class="statusbar">
+    {% if backend == 'mock' %}<span class="pill warn">Demo mode: mock estate</span>{% endif %}
+    {% if busy %}<span class="pill dark">Run #{{ current_run }} in progress</span>{% endif %}
+    <span class="pill {{ 'ok' if auto_apply else 'warn' }}">Auto-apply {{ 'on' if auto_apply else 'off (plan only)' }}</span>
+    <span class="pill {{ 'bad' if paused else 'ok' }}">Schedule {{ 'paused' if paused else 'every ' ~ cfg.sync_interval_minutes ~ ' min' }}</span>
+    {% if next_run and not paused %}<span class="pill">Next sync {{ next_run }}</span>{% endif %}
+    <span class="pill">Window {{ cfg.schedule.window_start }} to {{ cfg.schedule.window_end }}, {{ cfg.schedule.stagger_minutes }} min stagger</span>
+  </div>
+  {% block content %}{% endblock %}
+</main>
+<footer>Arc (U.K.) Systems Ltd. SCVMM cloud to Veeam Backup &amp; Replication job automation.</footer>
+</body>
+</html>

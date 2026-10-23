@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Isolation<span class="dot">.</span></h1>
+<p class="lede">This VBR server also protects VMware and Nutanix. The orchestrator only ever changes jobs it created itself. Everything listed on this page is read so that new jobs avoid its names and start times, and is never modified.</p>
+
+<div class="grid2">
+  <div class="panel dark">
+    <h3>How that is enforced</h3>
+    <ul class="arrows">
+      <li>Only jobs whose description carries the <code>[hvbo ...]</code> or <code>[hvbo-copy ...]</code> marker are owned. The marker is written when the orchestrator creates a job.</li>
+      <li>Before anything is sent, every operation is checked against the list of owned job IDs taken at plan time. One failure refuses the whole batch.</li>
+      <li>On the VBR server, every change re-reads the live job and refuses it unless it carries the marker and is a Hyper-V backup job.</li>
+      <li>New jobs are only created under names no other job on the server uses.</li>
+      <li>No job is ever deleted, started, stopped or disabled. No global or server setting is changed. The only change cmdlets used are listed alongside, and an automated test fails if any other one appears.</li>
+    </ul>
+  </div>
+  <div class="panel">
+    <h3>Change cmdlets the orchestrator may run</h3>
+    <ul class="arrows">
+      <li>Add-VBRHvBackupJob, Add-VBRBackupCopyJob: new jobs only</li>
+      <li>Add-VBRHvJobObject, Remove-VBRJobObject: VMs in owned jobs</li>
+      <li>Set-VBRJobOptions, Set-VBRJobVssOptions: owned jobs, at creation</li>
+      <li>Set-VBRJobSchedule, Enable-VBRJobSchedule: owned jobs</li>
+      <li>Move-VBRBackup: restore points between two owned jobs</li>
+    </ul>
+  </div>
+</div>
+
+{% if not plan %}<p class="muted">Run discovery to list the jobs on the server.</p>{% else %}
+<h2>Other platforms and job types ({{ foreign|length }})</h2>
+<div class="tablewrap"><table>
+  <thead><tr><th>Job</th><th>Type</th><th>Daily start</th><th>Access</th></tr></thead>
+  <tbody>
+  {% for f in foreign %}
+    <tr><td>{{ f.name }}</td><td>{{ f.type }}</td><td>{{ f.start_time or '' }}</td><td><span class="pill">Read only</span></td></tr>
+  {% else %}<tr><td colspan="4" class="muted">None found.</td></tr>{% endfor %}
+  </tbody>
+</table></div>
+
+<h2>Hand-built Hyper-V jobs ({{ hand_built|length }})</h2>
+<p class="small muted">VMs in these jobs count as backed up and are not added again, except VMs marked LargeData, which also go into their cloud's 90-day job. These jobs themselves are never changed.</p>
+<div class="tablewrap"><table>
+  <thead><tr><th>Job</th><th>Daily start</th><th class="num">Objects</th><th>Repository</th><th>Access</th></tr></thead>
+  <tbody>
+  {% for j in hand_built %}
+    <tr><td>{{ j.name }}</td><td>{{ j.start_time or '' }}</td><td class="num">{{ j.vm_count }}</td><td>{{ j.repository or '' }}</td><td><span class="pill">Read only</span></td></tr>
+  {% else %}<tr><td colspan="5" class="muted">None found.</td></tr>{% endfor %}
+  </tbody>
+</table></div>
+{% endif %}
+{% endblock %}

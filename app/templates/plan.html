@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Pending plan<span class="dot">.</span></h1>
+{% if not plan %}
+  <p class="lede">No plan yet. Run discovery from the overview page.</p>
+{% else %}
+  <p class="lede">Plan from run <a href="/runs/{{ latest.id }}">#{{ latest.id }}</a>, generated {{ plan.generated_at }} UTC{% if plan.rebalance %} (rebalance){% endif %}. Plans older than 30 minutes must be refreshed before they can be applied.</p>
+  <div class="actions-row">
+    <form class="inline" method="post" action="/actions/apply-plan" onsubmit="return confirm('Apply this plan to VBR?')">
+      <input type="hidden" name="run_id" value="{{ latest.id }}">
+      <button class="btn accent" {{ 'disabled' if busy or not plan.actions }}>Apply automatic actions</button>
+    </form>
+    <form class="inline" method="post" action="/actions/apply-plan" onsubmit="return confirm('Apply every action, including tier moves that need approval?')">
+      <input type="hidden" name="run_id" value="{{ latest.id }}"><input type="hidden" name="include_manual" value="true">
+      <button class="btn" {{ 'disabled' if busy or not plan.actions }}>Apply all, including approvals</button>
+    </form>
+    <form class="inline" method="post" action="/actions/run"><input type="hidden" name="mode" value="plan">
+      <button class="btn ghost" {{ 'disabled' if busy }}>Refresh plan</button></form>
+  </div>
+  {% for w in plan.warnings %}<div class="warnbox">{{ w }}</div>{% endfor %}
+  <h2>Actions</h2>
+  {% set actions = plan.actions %}
+  {% include "_actions_table.html" %}
+{% endif %}
+{% endblock %}

@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Run history<span class="dot">.</span></h1>
+<p class="lede">The last 500 runs are kept. Scheduled runs plan only unless auto-apply is on.</p>
+{% include "_runs_table.html" %}
+{% endblock %}

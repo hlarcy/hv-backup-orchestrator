@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Settings<span class="dot">.</span></h1>
+<p class="lede">Effective configuration, with secrets masked. Edit <code>config/config.yaml</code> and the <code>.env</code> file, then restart the container. Auto-apply and pause are runtime toggles on the overview page and override the file value.</p>
+<div class="grid2">
+  <div class="panel dark">
+    <h3>How a VM is tiered</h3>
+    <ul class="arrows">
+      <li>Every VM goes into its cloud's {{ cfg.tiers[cfg.default_tier].label }} job by default.</li>
+      <li>SCVMM custom property <b>{{ cfg.classification.custom_property }}</b> set to {{ cfg.classification.large_values|join(', ') }}, or tag {{ cfg.classification.large_tags|join(', ') }}, moves it to the {{ cfg.tiers['large'].label }} job{% if cfg.retier.remap_backups %} with its existing restore points{% endif %}.</li>
+      <li>Moving up is {{ 'automatic' if cfg.retier.auto_upgrade else 'held for approval' }}. Moving down is {{ 'automatic' if cfg.retier.auto_downgrade else 'held for approval' }}.</li>
+      {% if cfg.classification.exclude_values or cfg.classification.exclude_tags %}<li>Excluded: {{ (cfg.classification.exclude_values + cfg.classification.exclude_tags)|join(', ') }}.</li>{% else %}<li>No exclusions: every cloud VM is backed up.</li>{% endif %}
+      {% if cfg.classification.large_disk_threshold_gb %}<li>Also large data: {{ cfg.classification.disk_size_basis }} disk size of {{ cfg.classification.large_disk_threshold_gb }} GB or more.</li>{% endif %}
+    </ul>
+  </div>
+  <div class="panel">
+    <h3>Tiers</h3>
+    <ul class="arrows">{% for k, t in cfg.tiers.items() %}<li><b>{{ t.label }}</b>: {{ t.retention_days }} days{% if t.repository %} on {{ t.repository }}{% endif %}</li>{% endfor %}</ul>
+    <h3 style="margin-top:14px">Backup copy</h3>
+    <ul class="arrows">{% if cfg.backup_copy.enabled %}<li>{{ cfg.backup_copy.mode }} copy of every managed job to <b>{{ cfg.backup_copy.target_repository or 'not set' }}</b>, {{ cfg.backup_copy.retention_days }} days</li>{% else %}<li>Off</li>{% endif %}</ul>
+    <h3 style="margin-top:14px">Remote hosts</h3>
+    <ul class="arrows">
+      <li>SCVMM: {{ cfg.scvmm.host if cfg.scvmm else 'not set' }}</li>
+      <li>VBR: {{ cfg.vbr.host if cfg.vbr else 'not set' }}</li>
+    </ul>
+  </div>
+</div>
+<h2>Full configuration</h2>
+<pre class="log">{{ config_yaml }}</pre>
+{% endblock %}

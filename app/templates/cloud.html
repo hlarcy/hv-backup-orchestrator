@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="small"><a href="/">Overview</a></p>
+<h1>{{ cloud.name }}<span class="dot">.</span></h1>
+<div class="tiles">
+  <div class="tile"><div class="k">VMs</div><div class="v">{{ cloud.vms }}</div></div>
+  <div class="tile"><div class="k">Large data</div><div class="v">{{ cloud.large }}</div></div>
+  <div class="tile"><div class="k">Standard</div><div class="v">{{ cloud.standard }}</div></div>
+  <div class="tile dark"><div class="k">To add</div><div class="v">{{ cloud.pending }}</div></div>
+  <div class="tile"><div class="k">Moving tier</div><div class="v">{{ cloud.moving }}</div></div>
+</div>
+
+<h2>Jobs</h2>
+<div class="grid2">
+{% for t in ['large', 'standard'] %}
+  {% set j = cloud.jobs.get(t) %}
+  <div class="panel">
+    <h3>{{ cfg.tiers[t].label }}</h3>
+    {% if j %}
+      <ul class="arrows">
+        <li>{{ j.name }}{% if j.planned %} <span class="pill warn">planned</span>{% endif %}</li>
+        <li>Daily at {{ j.start_time or 'not scheduled' }}</li>
+        <li>Retention {{ j.retention_days or cfg.tiers[t].retention_days }} days</li>
+        <li>{{ j.vm_count }} object(s){% if j.repository %} on {{ j.repository }}{% endif %}</li>
+        {% set cp = cloud.copies.get(t) %}
+        {% if cfg.backup_copy.enabled %}<li>{% if cp %}Backup copy {{ cp.name }}{% if cp.planned %} (planned){% endif %}, {{ cp.retention_days or cfg.backup_copy.retention_days }} days on {{ cp.repository }}{% else %}No backup copy job yet{% endif %}</li>{% endif %}
+      </ul>
+    {% else %}<p class="muted">No VMs in this tier, so no job.</p>{% endif %}
+  </div>
+{% endfor %}
+</div>
+
+{% if actions %}<h2>Pending actions</h2>{% include "_actions_table.html" %}{% endif %}
+
+<h2>Virtual machines</h2>
+<div class="tablewrap"><table>
+  <thead><tr><th>VM</th><th>Host</th><th>State</th><th class="num">Provisioned GB</th><th>Tier</th><th>Why</th><th>Status</th><th>Backed up by</th></tr></thead>
+  <tbody>
+  {% for v in vms %}
+    <tr>
+      <td><b>{{ v.name }}</b><div class="small muted">{{ v.vm_guid }}</div></td>
+      <td class="small">{{ v.host }}</td>
+      <td class="small">{{ v.power }}</td>
+      <td class="num">{{ '{:,.0f}'.format(v.max_gb or 0) }}</td>
+      <td><span class="tag {{ v.tier }}">{{ cfg.tiers[v.tier].label if v.tier in cfg.tiers else 'Excluded' }}</span></td>
+      <td class="small">{{ v.tier_reason }}</td>
+      <td><span class="pill {{ 'ok' if v.status == 'protected' else ('warn' if v.status in ('pending', 'retier') else '') }}">{{ STATUS_LABEL.get(v.status, v.status) }}</span>
+        {% if v.note %}<div class="small muted">{{ v.note }}</div>{% endif %}</td>
+      <td class="small">{% for c in v.covered_by %}{{ c.job_name }} <span class="muted">({{ c.mode }})</span>{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endblock %}

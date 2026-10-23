@@ -1,0 +1,19 @@
+services:
+  hvbo:
+    build:
+      context: .
+      args:
+        KERBEROS: "0"
+    image: arc/hv-backup-orchestrator:latest
+    container_name: hvbo
+    restart: unless-stopped
+    ports:
+      - "8080:8080"          # put a TLS reverse proxy in front for anything beyond a management VLAN
+    env_file: .env
+    environment:
+      TZ: Europe/London      # job start times are VBR-server local; keep the UI clock aligned
+    volumes:
+      - ./config:/config:ro
+      - hvbo-data:/data
+volumes:
+  hvbo-data:

@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="small"><a href="/runs">Run history</a></p>
+<h1>Run #{{ run.id }}<span class="dot">.</span></h1>
+<p class="lede">{{ run.mode|replace('_', ' ')|capitalize }} run, triggered by {{ run.trigger }}. Started {{ run.started }} UTC{% if run.finished %}, finished {{ run.finished }}{% endif %}.
+  Status <b>{{ run.status|replace('_', ' ') }}</b>.</p>
+{% if run.error %}<div class="errbox">{{ run.error }}</div>{% endif %}
+
+{% if run.results %}
+<h2>Results</h2>
+<div class="tablewrap"><table>
+  <thead><tr><th>Operation</th><th>Job</th><th>Result</th><th>Messages</th><th>Read back from VBR</th></tr></thead>
+  <tbody>
+  {% for r in run.results %}
+    <tr><td>{{ r.op|replace('_', ' ') }}</td><td>{{ r.job_name }}</td>
+      <td><span class="pill {{ 'ok' if r.ok else ('warn' if r.partial else 'bad') }}">{{ 'OK' if r.ok else ('In progress' if r.partial else 'Failed') }}</span></td>
+      <td class="small"><ul class="arrows">{% for m in r.messages or [] %}<li>{{ m }}</li>{% endfor %}</ul></td>
+      <td class="small">{% if r.verify %}{% if r.verify.start_time %}Start {{ r.verify.start_time }}{{ '' if r.verify.schedule_enabled else ' (disabled)' }}, {% endif %}{% if r.verify.mode %}{{ r.verify.mode }}, {% endif %}retention {{ r.verify.retention_days }} {{ r.verify.retention_type }}{% if r.verify.object_count is defined %}, {{ r.verify.object_count }} object(s){% endif %}{% endif %}</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endif %}
+
+{% if run.plan and run.mode == 'plan' %}
+<h2>Planned actions</h2>
+{% set actions = run.plan.actions %}
+{% include "_actions_table.html" %}
+{% endif %}
+
+<h2>Log</h2>
+<pre class="log">{{ run.log or 'Waiting for output...' }}</pre>
+{% endblock %}

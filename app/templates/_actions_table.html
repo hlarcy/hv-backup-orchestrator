@@ -1,0 +1,21 @@
+<div class="tablewrap"><table>
+  <thead><tr><th>Action</th><th>Job</th><th>Cloud</th><th>Tier</th><th>Start</th><th>Repository</th><th class="num">VMs</th><th>Reason</th><th>State</th></tr></thead>
+  <tbody>
+  {% for a in actions %}
+    <tr>
+      <td><b>{{ {'create_job': 'Create job', 'add_vms': 'Add VMs', 'move_vms': 'Move VMs and backups' if a.remap_backups else 'Move VMs', 'set_schedule': 'Fix schedule', 'create_copy': 'Create copy job'}[a.type] }}</b></td>
+      <td>{{ a.job_name }}{% if a.from_job_name %}<div class="small muted">from {{ a.from_job_name }}</div>{% endif %}{% if a.source_job_name %}<div class="small muted">copies {{ a.source_job_name }}</div>{% endif %}</td>
+      <td>{{ a.cloud_name }}</td>
+      <td><span class="tag {{ a.tier }}">{{ cfg.tiers[a.tier].label if a.tier in cfg.tiers else a.tier }}</span>{% if a.type == 'create_copy' %} <span class="tag exclude">{{ a.retention_days }}d copy</span>{% endif %}</td>
+      <td>{{ a.start_time or '' }}</td>
+      <td>{{ a.repository or '' }}</td>
+      <td class="num">{{ a.vms|length if a.vms else '' }}</td>
+      <td class="small">{{ a.reason }}{% if a.vms %}<details><summary class="small">VMs</summary>{{ a.vms|map(attribute='name')|join(', ') }}</details>{% endif %}</td>
+      <td>{% if a.blocked %}<span class="pill bad">Blocked</span><div class="small">{{ a.blocked }}</div>
+          {% elif a.auto %}<span class="pill ok">Automatic</span>{% else %}<span class="pill warn">Needs approval</span>{% endif %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="9" class="muted">No changes needed. Every in-scope VM is in a backup job and every managed job is on its slot.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>

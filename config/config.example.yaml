@@ -1,0 +1,87 @@
+# HV Backup Orchestrator configuration. Copy to config/config.yaml.
+# Secrets (passwords) never go here: they come from .env.
+
+mock: false                      # true = demo estate, nothing remote is touched
+sync_interval_minutes: 60        # how often SCVMM is checked for new VMs
+auto_apply: false                # start in plan-only mode; flip on in the UI once happy
+include_stopped_vms: true
+
+# Coverage: any_hyperv_job = a VM already in ANY Hyper-V job (including hand-built ones) counts as
+# backed up and is left alone. managed_only = every cloud VM also goes into this tool's 30/90-day jobs.
+coverage_mode: any_hyperv_job
+default_tier: standard           # every VM lands here unless marked LargeData
+
+# ---------------------------------------------------------------- remote hosts (PSRP over WinRM)
+scvmm:
+  host: scvmm01.arc.local        # host with the VMM console/module; usually the VMM server itself
+  vmm_server_name: localhost     # name passed to Get-SCVMMServer on that host
+  ssl: true                      # 5986. Strongly preferred. ssl:false uses 5985 with NTLM message encryption
+  auth: ntlm                     # negotiate | ntlm | kerberos (build with KERBEROS=1) | credssp
+  cert_validation: true          # or set ca_bundle to your internal CA PEM mounted into /config
+  # ca_bundle: /config/arc-root-ca.pem
+  configuration_name: Microsoft.PowerShell   # VMM module is Windows PowerShell 5.1
+  operation_timeout: 600
+
+vbr:
+  host: vbr01.arc.local          # Windows VBR 13.1 server
+  ssl: true
+  auth: ntlm
+  cert_validation: true
+  # If the Veeam module will not load in Windows PowerShell 5.1, register a PowerShell 7
+  # endpoint on the VBR server (pwsh: Enable-PSRemoting) and set this to PowerShell.7
+  configuration_name: Microsoft.PowerShell
+  operation_timeout: 900
+
+# ---------------------------------------------------------------- tiers and retention
+tiers:
+  large:
+    label: LargeData 90d
+    retention_days: 90
+    # repository: SOBR-LongTerm  # optional per-tier repository
+  standard:
+    label: Standard 30d
+    retention_days: 30
+
+classification:
+  # Only these mark a VM as large data (90 days). Everything else is 30 days, whatever its size.
+  custom_property: BackupTier          # SCVMM custom property on the VM
+  large_values: [LargeData]
+  large_tags: [LargeData]              # SCVMM VM tags
+  exclude_values: []                   # empty = no VM can opt out; every VM is backed up
+  exclude_tags: []
+  large_disk_threshold_gb: null        # off; set e.g. 2048 to also treat big VMs as large data
+
+retier:
+  auto_upgrade: true             # LargeData added: move VM from the 30d job to the 90d job (creating it if needed)
+  auto_downgrade: false          # LargeData removed: moving back shortens retention, so it waits for approval
+  auto_cross_cloud: false        # VM moved to another SCVMM cloud: wait for approval
+  remap_backups: true            # move existing restore points with the VM (Move-VBRBackup; needs per-machine backup files)
+
+backup_copy:
+  enabled: true
+  target_repository: "SOBR-Copy-7d"   # must differ from the source job's repository
+  cloud_repositories: {}              # per-cloud override, e.g. {"Acme Legal": "REPO-ACME-COPY"}
+  retention_days: 7
+  mode: Immediate                     # Immediate (copies each new restore point) | Periodic
+  name_template: "{job} Copy"         # tokens: {job} {cloud} {tier} {tier_label}
+
+safety:
+  reserve_foreign_job_times: true     # never start a managed job in the same 3 minutes as a VMware/Nutanix/other job
+
+# ---------------------------------------------------------------- jobs
+job_name_template: "HVBO {cloud} {tier_label}"   # tokens: {cloud} {tier} {tier_label} {retention}
+job_name_max_length: 50
+template_job: null               # name of an existing VBR job to copy advanced/VSS options from
+default_repository: "SOBR-Tenants"
+cloud_repositories: {}           # per-cloud override, e.g. {"Acme Legal": "REPO-ACME"}
+cloud_tier_repositories: {}      # e.g. {"Acme Legal": {large: "REPO-ACME-LTR"}}
+include_clouds: []               # empty = all clouds
+exclude_clouds: []               # e.g. ["Infrastructure"]
+
+# ---------------------------------------------------------------- schedule
+schedule:
+  window_start: "18:00"
+  window_end: "00:00"            # 120 start slots at a 3-minute stagger
+  stagger_minutes: 3
+  avoid_unmanaged_job_times: true  # do not start a managed job in the same 3 minutes as a hand-built job
+  order: first_free              # rebalance order: first_free (by cloud name) | large_first
