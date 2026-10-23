@@ -63,7 +63,7 @@ def test_one_bad_op_stops_the_whole_batch():
 
 
 MUTATING = re.compile(r"\b(Add|Set|Remove|Enable|Disable|Start|Stop|Move|New|Copy|Update|Sync|Reset|Import|Export|Invoke)-VBR\w+", re.I)
-ALLOWED = {"add-vbrhvbackupjob", "add-vbrhvjobobject", "remove-vbrjobobject", "set-vbrjoboptions",
+ALLOWED = {"set-vbrjobadvancedbackupoptions", "add-vbrhvbackupjob", "add-vbrhvjobobject", "remove-vbrjobobject", "set-vbrjoboptions",
            "set-vbrjobvssoptions", "set-vbrjobschedule", "enable-vbrjobschedule", "add-vbrbackupcopyjob",
            "move-vbrbackup", "set-vbrbackupcopyjob",
            # These two only build an in-memory settings object for a copy job; they change nothing.

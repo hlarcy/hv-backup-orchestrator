@@ -441,3 +441,13 @@ def test_unreadable_encryption_uses_applied_record():
     assert [a["type"] for a in build_plan(cfg(enc=True), CLOUDS, [vm("a1")], jobs, {}, encryption_key=KEY)["actions"]] == ["set_encryption"]
     assert not build_plan(cfg(enc=True), CLOUDS, [vm("a1")], jobs, {}, encryption_key=KEY,
                           enc_applied={"backup:j1": "ITGlue"})["actions"]
+
+
+def test_half_created_job_is_finished_on_the_next_plan():
+    """A job created but whose settings failed (no schedule, GFS or encryption) gets each one fixed."""
+    j = job("j1", "HVBO C1 30d", marker("c1", "d30"), None, [vm("a1")])
+    j["gfs"] = {"enabled": False, "weekly": False, "weeks": 0, "day": "", "synthetic": False, "synthetic_days": []}
+    j["encryption"] = {"enabled": False, "key_id": None}
+    p = build_plan(cfg(gfs=True, enc=True), CLOUDS, [vm("a1")], [j], {}, encryption_key=KEY)
+    assert sorted(a["type"] for a in p["actions"]) == ["set_encryption", "set_gfs", "set_schedule"]
+    assert all(a["auto"] and not a.get("blocked") for a in p["actions"])

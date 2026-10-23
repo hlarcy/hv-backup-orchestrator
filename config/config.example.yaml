@@ -1,119 +1,142 @@
-# HV Backup Orchestrator configuration. Copy to config/config.yaml.
-# Secrets (passwords) never go here: they come from .env.
+# HV Backup Orchestrator configuration.
+# Copy to config/config.yaml and edit. Restart the container after changes.
+#
+# Layout: every section in this file sits at the top level (no indentation) and applies
+# globally, to every cloud and every job the app manages. Nothing is nested under a cloud.
+# The only per-cloud settings are the *_repositories maps and include/exclude_clouds below,
+# which take a cloud name or, better, its SCVMM ID.
+#
+# Secrets never go here. Passwords come from .env:
+#   VBR_PASSWORD, SCVMM_PASSWORD, SMTP_PASSWORD (and optionally VBR_USERNAME, SCVMM_USERNAME,
+#   SMTP_USERNAME, VBR_CERT_THUMBPRINT, SCVMM_CERT_THUMBPRINT)
 
-mock: false                      # true = demo estate, nothing remote is touched
-sync_interval_minutes: 60        # how often SCVMM is checked for new VMs
-auto_apply: false                # start in plan-only mode; flip on in the UI once happy
-include_stopped_vms: true
+# ================================================================ general
+mock: false                      # true = built-in demo estate; nothing remote is touched
+data_dir: /data                  # run history and state (the hvbo-data Docker volume)
+sync_interval_minutes: 60        # how often SCVMM and VBR are checked
+auto_apply: false                # start in plan-only mode; turn on in the UI once happy (the UI toggle wins)
+include_stopped_vms: true        # back up powered-off VMs too
 
-# Coverage: any_hyperv_job = a VM already in ANY Hyper-V job (including hand-built ones) counts as
-# backed up and is left alone. managed_only = every cloud VM also goes into this tool's 30/90-day jobs.
+# any_hyperv_job: a VM already in ANY Hyper-V job (including hand-built ones) counts as backed up.
+# managed_only:   every cloud VM also goes into this app's own jobs.
 coverage_mode: any_hyperv_job
 
-# Retention: the number of days in the VM's BackupTier custom property (any whole number above 0,
-# shorter or longer than the default). Blank, missing or not a number: this default.
+# ================================================================ retention
+# Each VM's retention is the whole number of days in its SCVMM custom property (e.g. 7, 45, 180, 400).
+# Blank, missing or anything that is not a whole number above 0: default_retention_days.
 default_retention_days: 30
 
-# ---------------------------------------------------------------- remote hosts (PSRP over WinRM)
+classification:
+  custom_property: BackupTier    # create once in SCVMM: New-SCCustomProperty -Name BackupTier -AddMember @("VM")
+
+retier:                          # when a VM's retention number changes
+  auto_upgrade: true             # raised: move the VM and its restore points to the longer job (created if needed)
+  auto_downgrade: false          # lowered: shortens how long backups are kept, so it waits for approval
+  auto_cross_cloud: false        # VM moved to another SCVMM cloud: wait for approval
+  remap_backups: true            # move existing restore points with the VM (Move-VBRBackup; per-machine backup files)
+
+# ================================================================ remote hosts (PowerShell remoting over WinRM)
 scvmm:
-  host: scvmm01.arc.local        # host with the VMM console/module; usually the VMM server itself
+  host: scvmm01.arc.local        # server with the VMM console/module, usually the VMM server itself
   vmm_server_name: localhost     # name passed to Get-SCVMMServer on that host
-  ssl: true                      # 5986. Strongly preferred. ssl:false uses 5985 with NTLM message encryption
-  auth: ntlm                     # negotiate | ntlm | kerberos (build with KERBEROS=1) | credssp
-  cert_validation: true          # or set ca_bundle to your internal CA PEM mounted into /config
-  # ca_bundle: /config/arc-root-ca.pem
-  # cert_thumbprint: "A1B2..."   # trust exactly this certificate (e.g. self-signed); see vbr below
-  configuration_name: Microsoft.PowerShell   # VMM module is Windows PowerShell 5.1
+  username: null                 # or SCVMM_USERNAME in .env, e.g. ARCHOSTED\svc-hvbo; password: SCVMM_PASSWORD
+  port: null                     # null = 5986 with ssl, 5985 without
+  ssl: true                      # HTTPS listener on the server (recommended)
+  auth: ntlm                     # ntlm | negotiate | kerberos (build with KERBEROS=1) | credssp
+  cert_validation: true          # check the WinRM certificate against a CA...
+  ca_bundle: null                # ...e.g. /config/arc-root-ca.pem, mounted into /config
+  cert_thumbprint: null          # ...or pin one certificate by thumbprint (self-signed is fine; host/IP need not match)
+  configuration_name: Microsoft.PowerShell   # VMM's module needs Windows PowerShell 5.1
+  pwsh_bridge: false             # SCVMM does not need PowerShell 7
+  pwsh_path: null
+  server_name: null              # VBR only; ignored here
+  accept_local_tls_certificate: true   # VBR only; ignored here
   operation_timeout: 600
 
 vbr:
   host: vbr01.arc.local          # Windows VBR 13.1 server (an IP address is fine when cert_thumbprint is set)
+  username: null                 # or VBR_USERNAME in .env; workgroup server = local account, e.g. VBR01\svc-hvbo
+  port: null
   ssl: true
-  auth: ntlm                     # workgroup server: local account, VBR_USERNAME=VBR01\svc-hvbo
+  auth: ntlm
   cert_validation: true
-  # Pin the WinRM HTTPS certificate by thumbprint. The connection is accepted only if the
-  # server presents exactly this certificate, so self-signed certificates work and the
-  # hostname/IP does not need to match. Copy from the server:
-  #   Get-ChildItem WSMan:\localhost\Listener\*\CertificateThumbprint
-  # Can also be set with VBR_CERT_THUMBPRINT in .env.
-  # cert_thumbprint: "D1CD2DE286756D1F3C83594F5FA5B0930ACB0479"
-  # VBR 13.x's PowerShell module needs PowerShell 7.6. Two ways to get there:
-  #  a) pwsh_bridge: true (recommended): connect to the built-in 5.1 endpoint and run each
-  #     script in a pwsh.exe child process. Needs PowerShell 7.6+ installed, nothing else.
-  #  b) pwsh_bridge: false + configuration_name: PowerShell.7 (Enable-PSRemoting run from pwsh).
+  ca_bundle: null
+  # Read it on the server: Get-ChildItem WSMan:\localhost\Listener\*\CertificateThumbprint
+  cert_thumbprint: null          # e.g. "D1CD2DE286756D1F3C83594F5FA5B0930ACB0479" (or VBR_CERT_THUMBPRINT in .env)
+  # VBR 13.x's PowerShell module needs PowerShell 7.6. The bridge connects to the built-in 5.1 endpoint
+  # and runs each script in pwsh.exe, so no PowerShell 7 remoting endpoint is needed.
   configuration_name: Microsoft.PowerShell
   pwsh_bridge: true
   pwsh_path: 'C:\Program Files\PowerShell\7\pwsh.exe'   # falls back to pwsh.exe on PATH
-  # Connect-VBRServer runs on the VBR server against itself. VBR 13 uses TLS for that too, and a
-  # non-interactive session cannot answer the "trust this certificate?" prompt, so the local
-  # certificate is accepted with -ForceAcceptTlsCertificate. The connection never leaves the server.
-  server_name: null                     # null = the server's own computer name
+  # Connect-VBRServer runs on the VBR server against itself, over TLS. A non-interactive session cannot
+  # answer "trust this certificate?", so the local certificate is accepted. It never leaves the server.
+  server_name: null              # null = the server's own computer name
   accept_local_tls_certificate: true
   operation_timeout: 900
 
-# ---------------------------------------------------------------- retention
-classification:
-  custom_property: BackupTier    # SCVMM custom property on the VM, e.g. 7, 45, 180, 400
-
-retier:
-  auto_upgrade: true             # retention increased: move VM (and restore points) to the longer job, creating it if needed
-  auto_downgrade: false          # retention decreased: shortens how long backups are kept, so it waits for approval
-  auto_cross_cloud: false        # VM moved to another SCVMM cloud: wait for approval
-  remap_backups: true            # move existing restore points with the VM (Move-VBRBackup; needs per-machine backup files)
-
-backup_copy:
-  enabled: true
-  target_repository: "SOBR-Copy-7d"   # must differ from the source job's repository
-  cloud_repositories: {}              # per-cloud override, e.g. {"Acme Legal": "REPO-ACME-COPY"}
-  retention_days: 7
-  mode: Immediate                     # Immediate (copies each new restore point) | Periodic
-  name_template: "{job} Copy"         # tokens: {job} {cloud} {tier} {tier_label}
-  compression: Auto                   # copy job storage settings, applied with encryption
-  storage_optimization: LocalTarget   # LocalTarget | LocalTargetHugeBackup | LANTarget | WANTarget | Automatic
-
-safety:
-  reserve_foreign_job_times: true     # never start a managed job in the same 3 minutes as a VMware/Nutanix/other job
-
-# ---------------------------------------------------------------- jobs
+# ================================================================ jobs and repositories
 job_name_template: "HVBO {cloud} {tier_label}"   # e.g. "HVBO Murrays Hall 30d". Tokens: {cloud} {tier_label} {retention}
 job_name_max_length: 50
-template_job: null               # name of an existing VBR job to copy advanced/VSS options from
-default_repository: "SOBR-Tenants"
-retention_repositories: {}       # optional per-retention target, e.g. {365: "SOBR-LongTerm"}
-cloud_repositories: {}           # per-cloud override, e.g. {"Acme Legal": "REPO-ACME"}
-cloud_tier_repositories: {}      # per cloud and retention, e.g. {"Acme Legal": {365: "REPO-ACME-LTR"}}
-include_clouds: []               # empty = all clouds
-exclude_clouds: []               # e.g. ["Infrastructure"]
-# Per-cloud settings above (cloud_repositories, cloud_tier_repositories, include/exclude_clouds and
-# backup_copy.cloud_repositories) accept the SCVMM cloud ID as well as its name. Use the ID so a
-# renamed cloud keeps its settings: (Get-SCCloud -Name "Acme Legal").ID
-rename_jobs_on_cloud_rename: approve   # approve | auto | off: rename our jobs when their cloud is renamed
+template_job: null               # existing VBR job to copy advanced/VSS options from (encryption is always applied after)
 
-# ---------------------------------------------------------------- encryption
+default_repository: "SOBR-Tenants"       # backup jobs go here unless one of the maps below matches
+retention_repositories: {}               # by retention days, e.g. {365: "SOBR-LongTerm"}
+cloud_repositories: {}                   # by cloud ID or name, e.g. {"8f1c...": "SOBR-Acme"}
+cloud_tier_repositories: {}              # by cloud and retention, e.g. {"8f1c...": {365: "SOBR-Acme-LTR"}}
+# Precedence: cloud_tier_repositories > cloud_repositories > retention_repositories > default_repository
+
+include_clouds: []               # cloud IDs or names; empty = all clouds
+exclude_clouds: []               # cloud IDs or names, e.g. ["Infrastructure"]
+# Use cloud IDs where you can, so a renamed cloud keeps its settings: (Get-SCCloud -Name "Acme Legal").ID
+rename_jobs_on_cloud_rename: approve     # approve | auto | off: rename this app's jobs when their cloud is renamed
+
+# ================================================================ backup copy jobs (one per backup job)
+backup_copy:
+  enabled: true
+  target_repository: "SOBR-Copy-7d"      # separate repository or SOBR; must differ from the backup job's
+  cloud_repositories: {}                 # per cloud ID or name, e.g. {"8f1c...": "SOBR-Acme-Copy"}
+  retention_days: 7
+  mode: Immediate                        # Immediate (copies each new restore point) | Periodic
+  name_template: "{job} Copy"            # tokens: {job} {cloud} {tier} {tier_label}
+  compression: Auto                      # Auto | None | DedupeFriendly | Optimal | High | Extreme
+  storage_optimization: LocalTarget      # LocalTarget | LocalTargetHugeBackup | LANTarget | WANTarget | Automatic
+
+# ================================================================ encryption (all backup AND copy jobs)
 encryption:
-  enabled: true                  # every backup job AND copy job the app manages is encrypted
-  key_description: ITGlue        # description of the key in VBR's key vault (Password Manager), matched exactly;
-                                 # if it is missing or not unique, no job is created or changed
+  enabled: true
+  key_description: ITGlue        # description of the key in VBR's key vault (Password Manager), matched exactly.
+                                 # Missing or not unique: no job is created or changed until it is fixed.
 
-# ---------------------------------------------------------------- weekly GFS + synthetic fulls
+# ================================================================ weekly GFS + synthetic fulls (all backup AND copy jobs)
 gfs:
   enabled: true                  # "Keep certain full backups longer for archival purposes", weekly
   weekly_keep_weeks: 1           # "Keep weekly full backups for N weeks"
   days: [Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday]   # days the app spreads jobs across
   copy_jobs: true                # copy jobs too, on the same day as their source job
 
-# ---------------------------------------------------------------- deleted VMs
+# ================================================================ start times
+schedule:
+  window_start: "18:00"
+  window_end: "00:00"            # 120 start slots at a 3-minute stagger
+  stagger_minutes: 3
+  avoid_unmanaged_job_times: true   # keep clear of hand-built Hyper-V jobs' start times
+  order: first_free              # rebalance order: first_free (by cloud name) | longest_first
+
+safety:
+  reserve_foreign_job_times: true   # keep clear of VMware, Nutanix and other jobs' start times
+
+# ================================================================ deleted VMs
 cleanup:
-  deleted_vms: approve           # approve | auto | off: remove VMs that no longer exist anywhere in SCVMM from our jobs
+  deleted_vms: approve           # approve | auto | off: remove VMs that no longer exist anywhere in SCVMM from this app's jobs
   max_per_run: 20                # more than this at once looks like an inventory problem, so it is blocked
 
-# ---------------------------------------------------------------- email alerts
+# ================================================================ email alerts
 email:
   enabled: false
   host: smtp.arc.local
   port: 587
   security: starttls             # starttls | ssl (usually port 465) | none
-  username: null                 # or SMTP_USERNAME in .env; password is SMTP_PASSWORD in .env
+  username: null                 # or SMTP_USERNAME in .env; password: SMTP_PASSWORD in .env
   sender: hvbo@arcsystems.co.uk
   to: [backups@arcsystems.co.uk]
   subject_prefix: "[HVBO]"
@@ -122,11 +145,4 @@ email:
   on_attention: true             # actions waiting for approval or blocked
   on_failure: true               # a run failed, e.g. SCVMM or VBR unreachable
   reminder_hours: 24             # repeat an unchanged attention/failure alert after this long; 0 = never
-
-# ---------------------------------------------------------------- schedule
-schedule:
-  window_start: "18:00"
-  window_end: "00:00"            # 120 start slots at a 3-minute stagger
-  stagger_minutes: 3
-  avoid_unmanaged_job_times: true  # do not start a managed job in the same 3 minutes as a hand-built job
-  order: first_free              # rebalance order: first_free (by cloud name) | longest_first
+  timeout: 30                    # seconds to wait for the SMTP server

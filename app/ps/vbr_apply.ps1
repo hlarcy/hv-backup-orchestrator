@@ -48,17 +48,26 @@ function Set-HvboSchedule($job, [string]$at) {
 
 # Weekly GFS on an orchestrator backup job, with a weekly synthetic full on the same day so the
 # GFS point always has a full to use. Only ever called on a job that passed Assert-HvboOwned.
+# VBR 12+ made the synthetic-full properties on the options object read-only, so those are set
+# with Set-VBRJobAdvancedBackupOptions (parameter spelling differs between builds: Synthetic/Syntethic).
 function Set-HvboBackupGfs($job, [string]$day, [int]$weeks) {
     Assert-HvboOwned $job
     $opts = Get-VBRJobOptions -Job $job
     $opts.GfsPolicy.IsEnabled = $true
     $opts.GfsPolicy.Weekly.IsEnabled = $true
     $opts.GfsPolicy.Weekly.KeepBackupsForNumberOfWeeks = $weeks
-    $opts.GfsPolicy.Weekly.DesiredTime = $day
-    $opts.BackupTargetOptions.TransformFullToSyntethic = $true
-    try { $opts.BackupTargetOptions.TransformToSyntethicDays = [System.DayOfWeek[]]@([System.DayOfWeek]$day) }
-    catch { $opts.BackupTargetOptions.TransformToSyntethicDays = [System.DayOfWeek]$day }
+    try { $opts.GfsPolicy.Weekly.DesiredTime = $day } catch { }
     Set-VBRJobOptions -Job $job -Options $opts | Out-Null
+
+    $job = Get-HvboJob ([pscustomobject]@{ job_id = "$($job.Id)" })
+    Assert-HvboOwned $job
+    $cmd = Get-Command Set-VBRJobAdvancedBackupOptions -ErrorAction SilentlyContinue
+    if (-not $cmd) { throw "Set-VBRJobAdvancedBackupOptions is not available, so the weekly synthetic full could not be set." }
+    $sp = if ($cmd.Parameters.ContainsKey('TransformFullToSynthetic')) { 'Synthetic' } else { 'Syntethic' }
+    $splat = @{ Job = $job; Algorithm = 'Incremental'; "TransformFullTo$sp" = $true
+                "TransformTo${sp}Days" = [System.DayOfWeek[]]@([System.DayOfWeek]$day) }
+    if ($cmd.Parameters.ContainsKey("TransformTo${sp}ScheduleKind")) { $splat["TransformTo${sp}ScheduleKind"] = 'Daily' }
+    Set-VBRJobAdvancedBackupOptions @splat | Out-Null
 }
 
 # Backup file encryption with the vault key, on one of our own backup jobs.
@@ -133,6 +142,7 @@ foreach ($op in @($in.operations)) {
                 }
                 $ents = New-Object System.Collections.Generic.List[object]
                 $missing = @()
+                $stepFailed = $false
                 foreach ($vm in @($op.vms)) {
                     if ($job -and (Test-HvboJobHasVm $job $vm)) { continue }
                     try { $ents.Add((Find-HvboVm $vm)) } catch { $missing += $_.Exception.Message }
@@ -159,22 +169,25 @@ foreach ($op in @($in.operations)) {
                             $res.messages += "Copied options from template job '$($op.template_job)'."
                         } else { $res.messages += "Template job '$($op.template_job)' not found or not a Hyper-V job; using defaults." }
                     }
-                    Set-HvboRetention $job $op.retention_days
-                    if ($op.gfs) {
-                        $job = Get-HvboJob ([pscustomobject]@{ job_id = "$($job.Id)" })
-                        Set-HvboBackupGfs $job $op.gfs.day ([int]$op.gfs.weeks)
-                        $res.messages += "Weekly GFS on, keeping $($op.gfs.weeks) week(s), with a synthetic full every $($op.gfs.day)."
+                    # Each setting is applied on its own, so one failure never leaves the rest undone.
+                    # Encryption and the schedule go first; a failure here marks the result failed and the
+                    # next plan picks up whatever is still missing (set_encryption / set_schedule / set_gfs).
+                    $steps = New-Object System.Collections.Generic.List[object]
+                    $steps.Add(@('retention', { Set-HvboRetention $job $op.retention_days }, "Retention $($op.retention_days) days."))
+                    if ($encKey) { $steps.Add(@('encryption', { Set-HvboBackupEncryption $job $encKey }, "Backup files encrypted with key '$($op.encryption_key)'.")) }
+                    if ($op.start_time) { $steps.Add(@('schedule', { Set-HvboSchedule $job $op.start_time }, "Daily schedule set to $($op.start_time).")) }
+                    if ($op.gfs) { $steps.Add(@('weekly GFS', { Set-HvboBackupGfs $job $op.gfs.day ([int]$op.gfs.weeks) }, "Weekly GFS on, keeping $($op.gfs.weeks) week(s), with a synthetic full every $($op.gfs.day).")) }
+                    foreach ($st in $steps) {
+                        try {
+                            $job = Get-HvboJob ([pscustomobject]@{ job_id = "$($job.Id)" })
+                            & $st[1]
+                            $res.messages += $st[2]
+                        } catch { $stepFailed = $true; $res.messages += "Setting $($st[0]) failed: $($_.Exception.Message)" }
                     }
-                    if ($encKey) {
-                        $job = Get-HvboJob ([pscustomobject]@{ job_id = "$($job.Id)" })
-                        Set-HvboBackupEncryption $job $encKey
-                        $res.messages += "Backup files encrypted with key '$($op.encryption_key)'."
-                    }
-                    if ($op.start_time) { Set-HvboSchedule $job $op.start_time }
                 }
                 $res.job_id = "$($job.Id)"; $res.job_name = $job.Name
                 $res.verify = Get-HvboVerify $job
-                $res.ok = ($missing.Count -eq 0)
+                $res.ok = ($missing.Count -eq 0) -and -not $stepFailed
             }
             'set_schedule' {
                 $job = Get-HvboJob $op

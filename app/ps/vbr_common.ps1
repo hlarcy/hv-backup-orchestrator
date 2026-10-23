@@ -166,7 +166,8 @@ function Get-HvboGfs($j, [string]$Kind = 'backup') {
         return [ordered]@{
             enabled = [bool]$gp.IsEnabled; weekly = [bool]$gp.Weekly.IsEnabled
             weeks = $gp.Weekly.KeepBackupsForNumberOfWeeks; day = "$($gp.Weekly.DesiredTime)"
-            synthetic = [bool]$bt.TransformFullToSyntethic; synthetic_days = @($bt.TransformToSyntethicDays | ForEach-Object { "$_" })
+            synthetic = [bool]($bt.TransformFullToSyntethic -or $bt.TransformFullToSynthetic)
+            synthetic_days = @(@($bt.TransformToSyntethicDays) + @($bt.TransformToSyntheticDays) | Where-Object { $_ -ne $null } | ForEach-Object { "$_" } | Select-Object -Unique)
         }
     } catch { return $null }
 }
