@@ -88,3 +88,20 @@ def test_wrong_pin_refused_before_auth(tls_server):
 def test_presented_thumbprint(tls_server):
     port, fp = tls_server
     assert presented_thumbprint("127.0.0.1", port) == fp
+
+
+def test_endpoint_name_is_not_double_prefixed():
+    from app.remote import endpoint_name
+    assert endpoint_name("Microsoft.PowerShell") == "Microsoft.PowerShell"
+    assert endpoint_name("http://schemas.microsoft.com/powershell/PowerShell.7") == "PowerShell.7"
+    assert endpoint_name(None) == "Microsoft.PowerShell"
+
+
+def test_resource_uri_sent_to_server():
+    """The URI pypsrp actually builds must be the single-prefixed one."""
+    from pypsrp.powershell import RunspacePool
+    from pypsrp.wsman import WSMan
+    from app.remote import endpoint_name
+    pool = RunspacePool(WSMan("127.0.0.1", username="u", password="p", ssl=True, auth="ntlm"),
+                        configuration_name=endpoint_name("Microsoft.PowerShell"))
+    assert pool.resource_uri == "http://schemas.microsoft.com/powershell/Microsoft.PowerShell"

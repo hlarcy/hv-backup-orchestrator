@@ -58,6 +58,18 @@ def presented_thumbprint(host: str, port: int) -> str | None:
         return None
 
 
+PS_URI_PREFIX = "http://schemas.microsoft.com/powershell/"
+
+
+def endpoint_name(configuration_name: str | None) -> str:
+    """pypsrp builds the resource URI itself, so pass only the endpoint name
+    (e.g. Microsoft.PowerShell or PowerShell.7). A full URI in config is accepted too."""
+    name = (configuration_name or "Microsoft.PowerShell").strip()
+    while name.lower().startswith(PS_URI_PREFIX):
+        name = name[len(PS_URI_PREFIX):]
+    return name
+
+
 def run_script(target: RemoteHost, script: str, payload: dict[str, Any]) -> Any:
     """Run `script` on `target`, passing `payload` as -InputJson, and parse its JSON output."""
     from pypsrp.powershell import PowerShell, RunspacePool
@@ -83,7 +95,7 @@ def run_script(target: RemoteHost, script: str, payload: dict[str, Any]) -> Any:
             raise RemoteError(f"{target.host}: cert_thumbprint needs ssl: true.")
         pin_certificate(wsman, target.cert_thumbprint)
     try:
-        with RunspacePool(wsman, configuration_name=f"http://schemas.microsoft.com/powershell/{target.configuration_name}") as pool:
+        with RunspacePool(wsman, configuration_name=endpoint_name(target.configuration_name)) as pool:
             ps = PowerShell(pool)
             ps.add_script(script).add_parameter("InputJson", json.dumps(payload))
             output = ps.invoke()
