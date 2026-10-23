@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import logging
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,8 @@ def presented_thumbprint(host: str, port: int) -> str | None:
         return None
 
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
 PS_URI_PREFIX = "http://schemas.microsoft.com/powershell/"
 
 
@@ -106,7 +109,7 @@ def run_script(target: RemoteHost, script: str, payload: dict[str, Any]) -> Any:
             else:
                 ps.add_script(script).add_parameter("InputJson", json.dumps(payload))
             output = ps.invoke()
-            errors = [str(e) for e in ps.streams.error]
+            errors = [ANSI_RE.sub("", str(e)) for e in ps.streams.error]
     except Exception as exc:  # network, auth, TLS
         hint = ""
         if target.ssl and ("SSL" in str(exc) or "Fingerprint" in str(exc)):

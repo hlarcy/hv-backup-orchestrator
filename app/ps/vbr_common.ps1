@@ -3,13 +3,32 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $WarningPreference = 'SilentlyContinue'
 
+# $HvboVbrServer and $HvboAcceptVbrTls are injected by the orchestrator from config (vbr.server_name,
+# vbr.accept_local_tls_certificate). VBR 13 talks TLS even to itself, and a non-interactive session
+# cannot answer the "trust this certificate?" prompt, so the certificate is accepted explicitly.
 function Connect-HvboVbr {
     if (-not (Get-Module -Name Veeam.Backup.PowerShell)) {
         Import-Module Veeam.Backup.PowerShell -DisableNameChecking -WarningAction SilentlyContinue | Out-Null
     }
     $session = $null
     try { $session = Get-VBRServerSession -ErrorAction SilentlyContinue } catch { }
-    if (-not $session) { Connect-VBRServer -Server localhost | Out-Null }
+    if ($session) { return }
+
+    $server = if ($HvboVbrServer) { $HvboVbrServer } else { $env:COMPUTERNAME }
+    $cmd = Get-Command Connect-VBRServer
+    $canAccept = $cmd.Parameters.ContainsKey('ForceAcceptTlsCertificate')
+    try {
+        if ($HvboAcceptVbrTls -and $canAccept) {
+            Connect-VBRServer -Server $server -ForceAcceptTlsCertificate -ErrorAction Stop | Out-Null
+        } else {
+            Connect-VBRServer -Server $server -ErrorAction Stop | Out-Null
+        }
+    } catch {
+        $hint = if (-not $HvboAcceptVbrTls) { ' Set vbr.accept_local_tls_certificate: true in config.' }
+                elseif (-not $canAccept) { ' This Connect-VBRServer has no -ForceAcceptTlsCertificate; trust the VBR certificate for this account first.' }
+                else { '' }
+        throw "Connect-VBRServer to '$server' failed: $($_.Exception.Message)$hint"
+    }
 }
 
 # Collect GUID-looking identifiers from the properties Veeam uses across versions.

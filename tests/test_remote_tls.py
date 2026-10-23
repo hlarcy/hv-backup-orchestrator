@@ -139,3 +139,18 @@ def test_pwsh_bridge_wraps_script(monkeypatch):
     assert "FromBase64String" in sent["script"]
     assert base64.b64decode(sent["ScriptB64"]).decode().endswith("Get-VBRJob")
     assert sent["InputJson"] == '{"a": 1}' and sent["Pwsh"].endswith("pwsh.exe")
+
+
+def test_vbr_settings_injected_after_param_block():
+    from app.backend import vbr_script
+    from app.config import AppConfig
+    c = AppConfig()
+    c.vbr = RemoteHost(host="h", server_name="HOSTED-BKUP01", accept_local_tls_certificate=False)
+    s = vbr_script(c, "vbr_probe.ps1").splitlines()
+    assert s[0].startswith("param(")
+    assert s[1] == "$HvboVbrServer = 'HOSTED-BKUP01'" and s[2] == "$HvboAcceptVbrTls = $false"
+
+
+def test_ansi_codes_stripped():
+    from app.remote import ANSI_RE
+    assert ANSI_RE.sub("", "\x1b[31;1mConnect-VBRServer: \x1b[0mfailed") == "Connect-VBRServer: failed"

@@ -43,6 +43,20 @@ def normalise_vbr(data: dict) -> dict:
     }
 
 
+def _ps_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def vbr_script(cfg: AppConfig, name: str) -> str:
+    """VBR script with shared helpers and the connection settings injected after param()."""
+    body = load_script(name, True)
+    first, _, rest = body.partition("\n")
+    v = cfg.vbr
+    settings = (f"$HvboVbrServer = {_ps_quote(v.server_name) if v and v.server_name else '$null'}\n"
+                f"$HvboAcceptVbrTls = {'$true' if (v is None or v.accept_local_tls_certificate) else '$false'}\n")
+    return f"{first}\n{settings}{rest}"
+
+
 class LiveBackend:
     name = "live"
 
@@ -63,18 +77,18 @@ class LiveBackend:
         return normalise_scvmm(data)
 
     def vbr_inventory(self) -> dict:
-        data = run_script(self._need("vbr"), load_script("vbr_inventory.ps1", True), {})
+        data = run_script(self._need("vbr"), vbr_script(self.cfg, "vbr_inventory.ps1"), {})
         return normalise_vbr(data)
 
     def apply(self, operations: list[dict]) -> list[dict]:
-        data = run_script(self._need("vbr"), load_script("vbr_apply.ps1", True), {"operations": operations})
+        data = run_script(self._need("vbr"), vbr_script(self.cfg, "vbr_apply.ps1"), {"operations": operations})
         return _as_list(data.get("results"))
 
     def probe(self) -> dict:
         out: dict[str, Any] = {}
         for key, script, common in (("scvmm", "scvmm_probe.ps1", False), ("vbr", "vbr_probe.ps1", True)):
             try:
-                out[key] = {"ok": True, "data": run_script(self._need(key), load_script(script, common), {
+                out[key] = {"ok": True, "data": run_script(self._need(key), (vbr_script(self.cfg, script) if common else load_script(script)), {
                     "VmmServer": self.cfg.scvmm_server_name,
                     "CustomPropertyName": self.cfg.classification.custom_property,
                 })}

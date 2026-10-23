@@ -39,6 +39,8 @@ class RemoteHost:
     # Run scripts in a PowerShell 7 child process launched from the configuration_name endpoint.
     # Needed for VBR 13.x when the PowerShell.7 remoting endpoint is unusable.
     pwsh_bridge: bool = False
+    server_name: str | None = None              # VBR only: name for Connect-VBRServer (default: the server's own name)
+    accept_local_tls_certificate: bool = True   # VBR only: -ForceAcceptTlsCertificate on that local connection
     pwsh_path: str = r"C:\Program Files\PowerShell\7\pwsh.exe"
     operation_timeout: int = 600
 
@@ -191,6 +193,8 @@ def _remote(section: dict | None, prefix: str) -> RemoteHost | None:
         configuration_name=section.get("configuration_name", "Microsoft.PowerShell"),
         operation_timeout=int(section.get("operation_timeout", 600)),
         pwsh_bridge=bool(section.get("pwsh_bridge", False)),
+        server_name=section.get("server_name"),
+        accept_local_tls_certificate=bool(section.get("accept_local_tls_certificate", True)),
         pwsh_path=section.get("pwsh_path") or r"C:\Program Files\PowerShell\7\pwsh.exe",
     )
 

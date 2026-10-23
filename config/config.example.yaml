@@ -41,6 +41,11 @@ vbr:
   configuration_name: Microsoft.PowerShell
   pwsh_bridge: true
   pwsh_path: 'C:\Program Files\PowerShell\7\pwsh.exe'   # falls back to pwsh.exe on PATH
+  # Connect-VBRServer runs on the VBR server against itself. VBR 13 uses TLS for that too, and a
+  # non-interactive session cannot answer the "trust this certificate?" prompt, so the local
+  # certificate is accepted with -ForceAcceptTlsCertificate. The connection never leaves the server.
+  server_name: null                     # null = the server's own computer name
+  accept_local_tls_certificate: true
   operation_timeout: 900
 
 # ---------------------------------------------------------------- tiers and retention

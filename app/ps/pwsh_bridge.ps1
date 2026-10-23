@@ -24,7 +24,8 @@ try {
     [IO.File]::WriteAllText($inFile, $InputJson, $utf8)
 
     $q = { param($p) $p -replace "'", "''" }
-    $inner = "`$ErrorActionPreference = 'Stop'; " +
+    $env:NO_COLOR = '1'
+    $inner = "`$ErrorActionPreference = 'Stop'; try { `$PSStyle.OutputRendering = 'PlainText' } catch { }; " +
              "`$r = & '$(& $q $scriptFile)' -InputJson ([IO.File]::ReadAllText('$(& $q $inFile)')); " +
              "[IO.File]::WriteAllText('$(& $q $outFile)', (`$r | Out-String), (New-Object System.Text.UTF8Encoding(`$false)))"
     # Windows PowerShell 5.1 turns native stderr into errors; don't let that abort the run.
