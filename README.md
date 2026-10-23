@@ -122,9 +122,12 @@ Then tell the app how to trust the certificate, per host:
 
 ### Veeam module and PowerShell 7
 
-VBR 13 ships a PowerShell module. If `Import-Module Veeam.Backup.PowerShell` fails under Windows PowerShell 5.1 on the VBR server, install PowerShell 7 there, run `Enable-PSRemoting -Force` from `pwsh`, and set `vbr.configuration_name: PowerShell.7`. The Diagnostics page shows which edition answered.
+VBR 13.x's `Veeam.Backup.PowerShell` module requires PowerShell 7.6 and will not load in Windows PowerShell 5.1. Install PowerShell 7.6 or later on the VBR server, then pick one:
 
-SCVMM's `VirtualMachineManager` module needs Windows PowerShell 5.1, so leave SCVMM on `Microsoft.PowerShell`.
+- Bridge (default, recommended): `vbr.pwsh_bridge: true` with `configuration_name: Microsoft.PowerShell`. The app connects to the built-in 5.1 endpoint and runs each script in a `pwsh.exe` child process, passing input and output through UTF-8 files in a private temp folder that is deleted afterwards. No extra remoting endpoint is needed.
+- Native endpoint: `pwsh_bridge: false`, `configuration_name: PowerShell.7`, after running `Enable-PSRemoting -Force` from an elevated `pwsh`. Some builds refuse this endpoint for local accounts over remote logons; use the bridge if so.
+
+SCVMM's `VirtualMachineManager` module needs Windows PowerShell 5.1, so leave SCVMM on `Microsoft.PowerShell` without the bridge.
 
 ### Veeam must see the VMs
 

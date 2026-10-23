@@ -97,7 +97,14 @@ def run_script(target: RemoteHost, script: str, payload: dict[str, Any]) -> Any:
     try:
         with RunspacePool(wsman, configuration_name=endpoint_name(target.configuration_name)) as pool:
             ps = PowerShell(pool)
-            ps.add_script(script).add_parameter("InputJson", json.dumps(payload))
+            if target.pwsh_bridge:
+                import base64
+                (ps.add_script(load_script("pwsh_bridge.ps1"))
+                   .add_parameter("InputJson", json.dumps(payload))
+                   .add_parameter("ScriptB64", base64.b64encode(script.encode("utf-8")).decode("ascii"))
+                   .add_parameter("Pwsh", target.pwsh_path))
+            else:
+                ps.add_script(script).add_parameter("InputJson", json.dumps(payload))
             output = ps.invoke()
             errors = [str(e) for e in ps.streams.error]
     except Exception as exc:  # network, auth, TLS

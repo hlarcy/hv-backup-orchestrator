@@ -104,4 +104,38 @@ def test_resource_uri_sent_to_server():
     from app.remote import endpoint_name
     pool = RunspacePool(WSMan("127.0.0.1", username="u", password="p", ssl=True, auth="ntlm"),
                         configuration_name=endpoint_name("Microsoft.PowerShell"))
-    assert pool.resource_uri == "http://schemas.microsoft.com/powershell/Microsoft.PowerShell"
+    assert pool.shell.resource_uri == "http://schemas.microsoft.com/powershell/Microsoft.PowerShell"
+
+
+def test_pwsh_bridge_wraps_script(monkeypatch):
+    """With pwsh_bridge the 5.1 endpoint receives the bridge, carrying the real script as base64."""
+    import base64
+    import app.remote as r
+    sent = {}
+
+    class FakePS:
+        def __init__(self, pool):
+            self.streams = type("S", (), {"error": []})()
+        def add_script(self, s):
+            sent["script"] = s; return self
+        def add_parameter(self, k, v):
+            sent[k] = v; return self
+        def invoke(self):
+            return ['{"ok": true}']
+
+    class FakePool:
+        def __init__(self, wsman, configuration_name):
+            sent["endpoint"] = configuration_name
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    import pypsrp.powershell as pp
+    monkeypatch.setattr(pp, "PowerShell", FakePS)
+    monkeypatch.setattr(pp, "RunspacePool", FakePool)
+    t = RemoteHost(host="h", username="u", password="p", ssl=True, pwsh_bridge=True,
+                   configuration_name="Microsoft.PowerShell")
+    assert r.run_script(t, "param([string]$InputJson)\nGet-VBRJob", {"a": 1}) == {"ok": True}
+    assert sent["endpoint"] == "Microsoft.PowerShell"
+    assert "FromBase64String" in sent["script"]
+    assert base64.b64decode(sent["ScriptB64"]).decode().endswith("Get-VBRJob")
+    assert sent["InputJson"] == '{"a": 1}' and sent["Pwsh"].endswith("pwsh.exe")

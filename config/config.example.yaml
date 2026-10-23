@@ -34,9 +34,13 @@ vbr:
   #   Get-ChildItem WSMan:\localhost\Listener\*\CertificateThumbprint
   # Can also be set with VBR_CERT_THUMBPRINT in .env.
   # cert_thumbprint: "D1CD2DE286756D1F3C83594F5FA5B0930ACB0479"
-  # If the Veeam module will not load in Windows PowerShell 5.1, register a PowerShell 7
-  # endpoint on the VBR server (pwsh: Enable-PSRemoting) and set this to PowerShell.7
+  # VBR 13.x's PowerShell module needs PowerShell 7.6. Two ways to get there:
+  #  a) pwsh_bridge: true (recommended): connect to the built-in 5.1 endpoint and run each
+  #     script in a pwsh.exe child process. Needs PowerShell 7.6+ installed, nothing else.
+  #  b) pwsh_bridge: false + configuration_name: PowerShell.7 (Enable-PSRemoting run from pwsh).
   configuration_name: Microsoft.PowerShell
+  pwsh_bridge: true
+  pwsh_path: 'C:\Program Files\PowerShell\7\pwsh.exe'   # falls back to pwsh.exe on PATH
   operation_timeout: 900
 
 # ---------------------------------------------------------------- tiers and retention

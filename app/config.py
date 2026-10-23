@@ -36,6 +36,10 @@ class RemoteHost:
     # self-signed certificate works without a CA bundle, and hostname/IP mismatches don't matter.
     cert_thumbprint: str | None = None
     configuration_name: str = "Microsoft.PowerShell"
+    # Run scripts in a PowerShell 7 child process launched from the configuration_name endpoint.
+    # Needed for VBR 13.x when the PowerShell.7 remoting endpoint is unusable.
+    pwsh_bridge: bool = False
+    pwsh_path: str = r"C:\Program Files\PowerShell\7\pwsh.exe"
     operation_timeout: int = 600
 
     @property
@@ -186,6 +190,8 @@ def _remote(section: dict | None, prefix: str) -> RemoteHost | None:
         cert_thumbprint=normalise_thumbprint(_secret(f"{prefix}_CERT_THUMBPRINT", section.get("cert_thumbprint"))),
         configuration_name=section.get("configuration_name", "Microsoft.PowerShell"),
         operation_timeout=int(section.get("operation_timeout", 600)),
+        pwsh_bridge=bool(section.get("pwsh_bridge", False)),
+        pwsh_path=section.get("pwsh_path") or r"C:\Program Files\PowerShell\7\pwsh.exe",
     )
 
 
