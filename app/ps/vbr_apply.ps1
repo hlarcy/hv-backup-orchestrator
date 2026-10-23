@@ -46,6 +46,39 @@ function Set-HvboSchedule($job, [string]$at) {
     Enable-VBRJobSchedule -Job $job | Out-Null
 }
 
+# Weekly GFS on an orchestrator backup job, with a weekly synthetic full on the same day so the
+# GFS point always has a full to use. Only ever called on a job that passed Assert-HvboOwned.
+function Set-HvboBackupGfs($job, [string]$day, [int]$weeks) {
+    Assert-HvboOwned $job
+    $opts = Get-VBRJobOptions -Job $job
+    $opts.GfsPolicy.IsEnabled = $true
+    $opts.GfsPolicy.Weekly.IsEnabled = $true
+    $opts.GfsPolicy.Weekly.KeepBackupsForNumberOfWeeks = $weeks
+    $opts.GfsPolicy.Weekly.DesiredTime = $day
+    $opts.BackupTargetOptions.TransformFullToSyntethic = $true
+    try { $opts.BackupTargetOptions.TransformToSyntethicDays = [System.DayOfWeek[]]@([System.DayOfWeek]$day) }
+    catch { $opts.BackupTargetOptions.TransformToSyntethicDays = [System.DayOfWeek]$day }
+    Set-VBRJobOptions -Job $job -Options $opts | Out-Null
+}
+
+# Backup file encryption with the vault key, on one of our own backup jobs.
+function Set-HvboBackupEncryption($job, $key) {
+    Assert-HvboOwned $job
+    Set-VBRJobAdvancedStorageOptions -Job $job -EnableEncryption $true -EncryptionKey $key | Out-Null
+}
+
+function New-HvboCopyStorage($key, [string]$compression, [string]$optimization) {
+    # In-memory storage settings for a backup copy job (encryption with the vault key); changes nothing on its own.
+    return (New-VBRBackupCopyJobStorageOptions -CompressionLevel $compression -StorageOptimizationType $optimization `
+            -EnableEncryption -EncryptionKey $key)
+}
+
+function New-HvboCopyGfs([string]$day, [int]$weeks) {
+    # In-memory settings object for a backup copy job; changes nothing on its own.
+    $weekly = New-VBRComputerGFSWeeklyOptions -RetentionPeriod $weeks -SelectedDay $day
+    return (New-VBRComputerGFSOptions -GFSWeeklyOptions $weekly)
+}
+
 function Get-HvboVerify($job) {
     $job = Get-HvboJob ([pscustomobject]@{ job_id = "$($job.Id)" })
     $ret = Get-HvboRetention $job
@@ -55,13 +88,31 @@ function Get-HvboVerify($job) {
         retention_type   = $ret.type
         retention_days   = $ret.days
         object_count     = @(Get-VBRJobObject -Job $job).Count
+        gfs              = Get-HvboGfs $job
+        encryption       = Get-HvboEncryption $job
     }
 }
 
 function Get-HvboVmBackup($job, $vm) {
-    # The backup (restore point chain) of $job that holds $vm, if any. Read only.
+    # Find the backup of $job holding $vm's restore points. Read only.
+    # Matched by Hyper-V VM ID first, so a VM renamed since its last backup is still found (Veeam
+    # keeps the name it had when backed up). Falls back to the current name only when the backup
+    # exposes no IDs at all. Returns @{ Backup; Name (the name inside the backup); By }.
+    $g = "$($vm.vm_guid)".ToLower()
     foreach ($b in @(Get-VBRBackup | Where-Object { "$($_.JobId)" -eq "$($job.Id)" })) {
-        try { if (@($b.GetObjects() | Where-Object { $_.Name -eq $vm.name }).Count -gt 0) { return $b } } catch { }
+        $items = @()
+        try { $items = @($b.GetObjects()) } catch { }
+        if (-not $items.Count) { try { $items = @(Get-VBRRestorePoint -Backup $b) } catch { } }
+        $sawIds = $false
+        foreach ($o in $items) {
+            $refs = ((Get-HvboRefs $o) -join ' ').ToLower()
+            if ($refs) { $sawIds = $true }
+            if ($g -and $refs.Contains($g)) { return @{ Backup = $b; Name = $o.Name; By = 'VM ID' } }
+        }
+        if (-not $sawIds) {
+            $hit = @($items | Where-Object { $_.Name -eq $vm.name } | Select-Object -First 1)
+            if ($hit.Count) { return @{ Backup = $b; Name = $hit[0].Name; By = 'name' } }
+        }
     }
     return $null
 }
@@ -94,6 +145,8 @@ foreach ($op in @($in.operations)) {
                     } else { $res.messages += "Nothing to add to '$($job.Name)'." }
                 } else {
                     if ($ents.Count -eq 0) { throw "No VMs could be resolved in Veeam; job not created." }
+                    # Resolve the encryption key first: no key, no job (never create an unencrypted one).
+                    $encKey = if ($op.encryption_key) { Get-HvboEncryptionKey $op.encryption_key } else { $null }
                     $repo = Get-HvboRepo $op.repository
                     $job = Add-VBRHvBackupJob -Name $op.job_name -Entity $ents.ToArray() -BackupRepository $repo -Description $op.description
                     $res.messages += "Created job '$($op.job_name)' with $($ents.Count) VM(s) on '$($op.repository)'."
@@ -107,6 +160,16 @@ foreach ($op in @($in.operations)) {
                         } else { $res.messages += "Template job '$($op.template_job)' not found or not a Hyper-V job; using defaults." }
                     }
                     Set-HvboRetention $job $op.retention_days
+                    if ($op.gfs) {
+                        $job = Get-HvboJob ([pscustomobject]@{ job_id = "$($job.Id)" })
+                        Set-HvboBackupGfs $job $op.gfs.day ([int]$op.gfs.weeks)
+                        $res.messages += "Weekly GFS on, keeping $($op.gfs.weeks) week(s), with a synthetic full every $($op.gfs.day)."
+                    }
+                    if ($encKey) {
+                        $job = Get-HvboJob ([pscustomobject]@{ job_id = "$($job.Id)" })
+                        Set-HvboBackupEncryption $job $encKey
+                        $res.messages += "Backup files encrypted with key '$($op.encryption_key)'."
+                    }
                     if ($op.start_time) { Set-HvboSchedule $job $op.start_time }
                 }
                 $res.job_id = "$($job.Id)"; $res.job_name = $job.Name
@@ -134,14 +197,15 @@ foreach ($op in @($in.operations)) {
                 foreach ($vm in @($op.vms)) {
                     $state = 'no restore points to move'
                     if ($op.remap) {
-                        $bk = Get-HvboVmBackup $src $vm
-                        if ($bk) {
+                        $found = Get-HvboVmBackup $src $vm
+                        if ($found) {
+                            $bk = $found.Backup
                             try {
                                 if ($sameRepo) {
-                                    Move-VBRBackup -Backup $bk -Name @($vm.name) -Job $dst -Force -Confirm:$false | Out-Null
-                                    $state = 'restore points moved'
+                                    Move-VBRBackup -Backup $bk -Name @($found.Name) -Job $dst -Force -Confirm:$false | Out-Null
+                                    $state = "restore points moved (found by $($found.By)$(if ($found.Name -ne $vm.name) { ", backed up as '$($found.Name)'" }))"
                                 } else {
-                                    Move-VBRBackup -Backup $bk -Name @($vm.name) -Job $dst -Force -Confirm:$false -RunAsync | Out-Null
+                                    Move-VBRBackup -Backup $bk -Name @($found.Name) -Job $dst -Force -Confirm:$false -RunAsync | Out-Null
                                     $state = 'restore point move started (different repository, runs in background)'
                                 }
                             } catch { $state = "restore points not moved: $($_.Exception.Message)" }
@@ -182,12 +246,103 @@ foreach ($op in @($in.operations)) {
                 Assert-HvboOwned $src
                 $repo = Get-HvboRepo $op.repository
                 if ((Get-HvboRepoId $src) -eq "$($repo.Id)") { throw "Copy target '$($op.repository)' is the source job's own repository." }
-                $cj = Add-VBRBackupCopyJob -Name $op.copy_name -Description $op.description -Mode $op.mode `
-                        -BackupJob @($src) -TargetRepository $repo -DirectOperation `
-                        -RetentionType RestoreDays -RetentionNumber ([int]$op.retention_days)
+                $copyArgs = @{ Name = $op.copy_name; Description = $op.description; Mode = $op.mode; BackupJob = @($src)
+                               TargetRepository = $repo; DirectOperation = $true
+                               RetentionType = 'RestoreDays'; RetentionNumber = [int]$op.retention_days }
+                if ($op.gfs) { $copyArgs.GFSOptions = New-HvboCopyGfs $op.gfs.day ([int]$op.gfs.weeks) }
+                if ($op.encryption_key) {
+                    $copyArgs.StorageOptions = New-HvboCopyStorage (Get-HvboEncryptionKey $op.encryption_key) $op.copy_compression $op.copy_optimization
+                }
+                $cj = Add-VBRBackupCopyJob @copyArgs
+                if ($op.gfs) { $res.messages += "Weekly GFS on, keeping $($op.gfs.weeks) week(s), weekly full on $($op.gfs.day)." }
+                if ($op.encryption_key) { $res.messages += "Backup files encrypted with key '$($op.encryption_key)'." }
                 $res.job_id = "$($cj.Id)"; $res.job_name = $cj.Name
                 $res.messages += "Created $($op.mode) backup copy job '$($op.copy_name)' from '$($src.Name)' to '$($op.repository)', keeping $($op.retention_days) days."
-                $res.verify = [pscustomobject]@{ retention_type = "$($cj.RetentionType)"; retention_days = $cj.RetentionNumber; mode = "$($cj.Mode)" }
+                $res.verify = [pscustomobject]@{ retention_type = "$($cj.RetentionType)"; retention_days = $cj.RetentionNumber; mode = "$($cj.Mode)"; gfs = Get-HvboGfs $cj 'copy'; encryption = Get-HvboEncryption $cj 'copy' }
+                $res.ok = $true
+            }
+            'set_encryption' {
+                # Turn on backup file encryption with the vault key on one of our own jobs.
+                $key = Get-HvboEncryptionKey $op.encryption_key
+                if ($op.job_kind -eq 'copy') {
+                    $cj = @(Get-VBRBackupCopyJob -WarningAction SilentlyContinue | Where-Object { "$($_.Id)" -eq "$($op.job_id)" })[0]
+                    Assert-HvboOwned $cj 'copy'
+                    Set-VBRBackupCopyJob -Job $cj -StorageOptions (New-HvboCopyStorage $key $op.copy_compression $op.copy_optimization) | Out-Null
+                    $cj = @(Get-VBRBackupCopyJob -WarningAction SilentlyContinue | Where-Object { "$($_.Id)" -eq "$($op.job_id)" })[0]
+                    $e = Get-HvboEncryption $cj 'copy'
+                    $res.job_id = "$($cj.Id)"; $res.job_name = $cj.Name
+                } else {
+                    $job = Get-HvboJob $op
+                    Assert-HvboOwned $job
+                    Set-HvboBackupEncryption $job $key
+                    $job = Get-HvboJob $op
+                    $e = Get-HvboEncryption $job
+                    $res.job_id = "$($job.Id)"; $res.job_name = $job.Name
+                }
+                $res.verify = [pscustomobject]@{ encryption = $e }
+                $res.ok = (-not $e) -or ($e.enabled -and ((-not $e.key_id) -or $e.key_id -eq "$($key.Id)"))
+                $res.messages += $(if ($res.ok) { "Backup files encrypted with key '$($op.encryption_key)'. Veeam runs an active full next time for existing backups." } else { "Encryption read back as $($e | ConvertTo-Json -Compress)." })
+            }
+            'set_gfs' {
+                # Turn on / correct weekly GFS (and the weekly synthetic full) on one of our own jobs.
+                if ($op.job_kind -eq 'copy') {
+                    $cj = @(Get-VBRBackupCopyJob -WarningAction SilentlyContinue | Where-Object { "$($_.Id)" -eq "$($op.job_id)" })[0]
+                    Assert-HvboOwned $cj 'copy'
+                    Set-VBRBackupCopyJob -Job $cj -GFSOptions (New-HvboCopyGfs $op.day ([int]$op.weeks)) | Out-Null
+                    $cj = @(Get-VBRBackupCopyJob -WarningAction SilentlyContinue | Where-Object { "$($_.Id)" -eq "$($op.job_id)" })[0]
+                    $res.job_id = "$($cj.Id)"; $res.job_name = $cj.Name
+                    $res.verify = [pscustomobject]@{ gfs = Get-HvboGfs $cj 'copy' }
+                    $res.messages += "Copy job weekly GFS: keep $($op.weeks) week(s), weekly full on $($op.day)."
+                    $res.ok = $true
+                } else {
+                    $job = Get-HvboJob $op
+                    Assert-HvboOwned $job
+                    Set-HvboBackupGfs $job $op.day ([int]$op.weeks)
+                    $v = Get-HvboVerify $job
+                    $res.job_id = "$($job.Id)"; $res.job_name = $job.Name; $res.verify = $v
+                    $g = $v.gfs
+                    $res.ok = (-not $g) -or ($g.enabled -and $g.weekly -and $g.synthetic -and $g.day -eq $op.day)
+                    $res.messages += $(if ($res.ok) { "Weekly GFS: keep $($op.weeks) week(s), synthetic full every $($op.day)." } else { "GFS read back as $($g | ConvertTo-Json -Compress), expected weekly on $($op.day)." })
+                }
+            }
+            'rename_job' {
+                # Only our own jobs (the marker is checked on the live job), and only to a name nobody uses.
+                if ($op.job_kind -eq 'copy') {
+                    $job = @(Get-VBRBackupCopyJob -WarningAction SilentlyContinue | Where-Object { "$($_.Id)" -eq "$($op.job_id)" })[0]
+                    Assert-HvboOwned $job 'copy'
+                } else {
+                    $job = Get-HvboJob $op
+                    Assert-HvboOwned $job
+                }
+                $clash = Get-HvboAnyJobByName $op.new_name
+                if ($clash -and "$($clash.Id)" -ne "$($job.Id)") { throw "Another job is already called '$($op.new_name)'." }
+                if ($op.job_kind -eq 'copy') {
+                    Set-VBRBackupCopyJob -Job $job -Name $op.new_name | Out-Null
+                    $after = @(Get-VBRBackupCopyJob -WarningAction SilentlyContinue | Where-Object { "$($_.Id)" -eq "$($op.job_id)" })[0].Name
+                } else {
+                    # Veeam has no supported rename cmdlet for Hyper-V backup jobs; this is the documented workaround.
+                    $job.Info.CommonInfo.Name = $op.new_name
+                    $job.Update() | Out-Null
+                    $after = (Get-HvboJob ([pscustomobject]@{ job_id = $op.job_id })).Name
+                }
+                $res.ok = ($after -eq $op.new_name)
+                $res.job_id = "$($job.Id)"; $res.job_name = $after
+                $res.messages += $(if ($res.ok) { "Renamed '$($op.job_name)' to '$($op.new_name)'." } else { "Rename did not take effect; the job is still called '$after'." })
+            }
+            'remove_deleted_vms' {
+                # Removes objects for VMs that no longer exist in SCVMM. Matched by VM ID only, never by name.
+                # The restore points are not touched; Veeam's retention handles them.
+                $job = Get-HvboJob $op
+                Assert-HvboOwned $job
+                $removed = @()
+                foreach ($vm in @($op.vms)) {
+                    $g = "$($vm.vm_guid)".ToLower()
+                    if (-not $g) { continue }
+                    $objs = @(Get-VBRJobObject -Job $job | Where-Object { ((Get-HvboRefs $_) -join ' ').ToLower().Contains($g) })
+                    if ($objs.Count) { Remove-VBRJobObject -Objects $objs | Out-Null; $removed += $vm.name }
+                }
+                $res.messages += "Removed $($removed.Count) deleted VM(s) from '$($job.Name)': $($removed -join ', '). Their restore points are kept."
+                $res.job_id = "$($job.Id)"; $res.job_name = $job.Name
                 $res.ok = $true
             }
             default { throw "Unknown operation '$($op.op)'." }

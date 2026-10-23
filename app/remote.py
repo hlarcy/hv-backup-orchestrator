@@ -73,6 +73,16 @@ def endpoint_name(configuration_name: str | None) -> str:
     return name
 
 
+def effective_endpoint(target: RemoteHost) -> str:
+    """The bridge launches pwsh.exe itself, so it must run in Windows PowerShell 5.1.
+    A PowerShell 7 endpoint left in config would defeat it, so it is overridden."""
+    name = endpoint_name(target.configuration_name)
+    if target.pwsh_bridge and name.lower().startswith("powershell."):
+        log.warning("%s: pwsh_bridge is on, using Microsoft.PowerShell instead of %s", target.host, name)
+        return "Microsoft.PowerShell"
+    return name
+
+
 def run_script(target: RemoteHost, script: str, payload: dict[str, Any]) -> Any:
     """Run `script` on `target`, passing `payload` as -InputJson, and parse its JSON output."""
     from pypsrp.powershell import PowerShell, RunspacePool
@@ -98,7 +108,7 @@ def run_script(target: RemoteHost, script: str, payload: dict[str, Any]) -> Any:
             raise RemoteError(f"{target.host}: cert_thumbprint needs ssl: true.")
         pin_certificate(wsman, target.cert_thumbprint)
     try:
-        with RunspacePool(wsman, configuration_name=endpoint_name(target.configuration_name)) as pool:
+        with RunspacePool(wsman, configuration_name=effective_endpoint(target)) as pool:
             ps = PowerShell(pool)
             if target.pwsh_bridge:
                 import base64
@@ -118,7 +128,8 @@ def run_script(target: RemoteHost, script: str, payload: dict[str, Any]) -> Any:
                 hint = f" Server presented certificate thumbprint {seen.upper()}"
                 hint += " (does not match cert_thumbprint)." if target.cert_thumbprint else \
                     ". Check this matches the WinRM certificate on the server before pinning it with cert_thumbprint."
-        raise RemoteError(f"{target.host}: {type(exc).__name__}: {exc}{hint}") from exc
+        raise RemoteError(f"{target.host} [endpoint {effective_endpoint(target)}"
+                          f"{', pwsh bridge' if target.pwsh_bridge else ''}]: {type(exc).__name__}: {exc}{hint}") from exc
 
     text = "".join(str(o) for o in output if o is not None).strip()
     if not text:

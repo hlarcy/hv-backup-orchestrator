@@ -17,14 +17,18 @@ def _as_list(v: Any) -> list:
     return v if isinstance(v, list) else [v]
 
 
-def normalise_scvmm(data: dict) -> tuple[list[dict], list[dict]]:
+def normalise_scvmm(data: dict) -> tuple[list[dict], list[dict], list[str] | None]:
     clouds = _as_list(data.get("clouds"))
     vms = []
     for v in _as_list(data.get("vms")):
         v["tags"] = [t for t in _as_list(v.get("tags")) if t]
         v["vm_guid"] = (v.get("vm_guid") or "").strip("{} ").lower() or None
         vms.append(v)
-    return clouds, vms
+    guids = data.get("all_vm_guids")
+    all_guids = None if guids is None else [str(g).strip("{} ").lower() for g in _as_list(guids) if g]
+    if int(data.get("vms_without_id") or 0) > 0:
+        all_guids = None   # some VM IDs unknown: a VM could look deleted when it isn't, so skip clean-up
+    return clouds, vms, all_guids
 
 
 def normalise_vbr(data: dict) -> dict:
@@ -40,6 +44,7 @@ def normalise_vbr(data: dict) -> dict:
         "foreign_jobs": _as_list(data.get("foreign_jobs")),
         "all_job_names": [n for n in _as_list(data.get("all_job_names")) if n],
         "repositories": [r for r in _as_list(data.get("repositories")) if r],
+        "encryption_key": data.get("encryption_key"),
     }
 
 
@@ -69,7 +74,7 @@ class LiveBackend:
             raise RemoteError(f"No '{which}' host configured in config.yaml.")
         return target
 
-    def scvmm_inventory(self) -> tuple[list[dict], list[dict]]:
+    def scvmm_inventory(self) -> tuple[list[dict], list[dict], list[str] | None]:
         data = run_script(self._need("scvmm"), load_script("scvmm_inventory.ps1"), {
             "VmmServer": self.cfg.scvmm_server_name,
             "CustomPropertyName": self.cfg.classification.custom_property,
@@ -77,7 +82,8 @@ class LiveBackend:
         return normalise_scvmm(data)
 
     def vbr_inventory(self) -> dict:
-        data = run_script(self._need("vbr"), vbr_script(self.cfg, "vbr_inventory.ps1"), {})
+        data = run_script(self._need("vbr"), vbr_script(self.cfg, "vbr_inventory.ps1"),
+                          {"EncryptionKey": self.cfg.encryption.key_description if self.cfg.encryption.enabled else None})
         return normalise_vbr(data)
 
     def apply(self, operations: list[dict]) -> list[dict]:
@@ -174,7 +180,7 @@ class MockBackend:
         # Pretend last night's jobs ran: every VM in a managed job now has restore points there.
         for j in st["jobs"]:
             if "[hvbo cloud=" in (j.get("description") or ""):
-                st["points"][j["id"]] = sorted({o["name"] for o in j["objects"]})
+                st["points"][j["id"]] = sorted({o["refs"][0] for o in j["objects"] if o.get("refs")})   # by VM ID
         r = random.random()
         if r < 0.45:  # a new VM appears in a tenant cloud
             cloud = random.choice(st["clouds"])
@@ -186,6 +192,18 @@ class MockBackend:
                 "cluster": "HVCL01.arc.local", "status": "Running", "in_library": False,
                 "max_gb": 127.0, "used_gb": 40.0, "custom_property": None, "tags": [],
             })
+        elif r < 0.55 and st["vms"]:  # a VM is deleted from SCVMM
+            gone = random.choice(st["vms"])
+            st["vms"].remove(gone)
+        elif r < 0.62 and st["vms"]:  # a VM is renamed (its VM ID stays the same)
+            v = random.choice(st["vms"])
+            v["name"] = v["name"] + "-R"
+        elif r < 0.66:  # a cloud is renamed (its ID stays the same)
+            c = random.choice(st["clouds"])
+            c["name"] = c["name"] + " Ltd"
+            for v in st["vms"]:
+                if v["cloud_id"] == c["id"]:
+                    v["cloud_name"] = c["name"]
         elif r < 0.8:  # someone sets BackupTier=90 on a VM already in a default-retention job
             in_std = {o["refs"][0] for j in st["jobs"] if f"tier=d{self.cfg.default_retention_days}]" in (j.get("description") or "")
                       for o in j["objects"] if o["refs"]}
@@ -193,12 +211,17 @@ class MockBackend:
             if cands:
                 random.choice(cands)["custom_property"] = "90"
         self._save()
-        return json.loads(json.dumps(st["clouds"])), json.loads(json.dumps(st["vms"]))
+        alive = [v["vm_guid"] for v in st["vms"]] + st.get("non_cloud_guids", [])
+        return json.loads(json.dumps(st["clouds"])), json.loads(json.dumps(st["vms"])), alive
 
     def vbr_inventory(self) -> dict:
         st = self.state
         names = [j["name"] for j in st["jobs"]] + [c["name"] for c in st["copy_jobs"]] + [f["name"] for f in st["foreign"]]
-        return {"jobs": json.loads(json.dumps(st["jobs"])), "copy_jobs": json.loads(json.dumps(st["copy_jobs"])),
+        keys = st.setdefault("encryption_keys", {"ITGlue": "key-itglue-0001"})
+        want = self.cfg.encryption.key_description
+        enc_key = {"description": want, "count": 1 if want in keys else 0, "id": keys.get(want)}
+        return {"encryption_key": enc_key,
+                "jobs": json.loads(json.dumps(st["jobs"])), "copy_jobs": json.loads(json.dumps(st["copy_jobs"])),
                 "foreign_jobs": [{k: f[k] for k in ("name", "type", "platform", "start_time", "schedule_enabled")}
                                  for f in st["foreign"]],
                 "all_job_names": names, "repositories": list(st["repositories"])}
@@ -212,6 +235,21 @@ class MockBackend:
         if marker not in (job.get("description") or "") or (kind == "backup" and "Hyper-V" not in job.get("type", "")):
             raise RuntimeError(f"SAFETY: '{job['name']}' is not managed by the orchestrator. It was not changed.")
         return job
+
+    @staticmethod
+    def _gfs(g: dict | None) -> dict:
+        if not g:
+            return {"enabled": False, "weekly": False, "weeks": 1, "day": "Sunday", "synthetic": False, "synthetic_days": []}
+        return {"enabled": True, "weekly": True, "weeks": int(g["weeks"]), "day": g["day"], "synthetic": True,
+                "synthetic_days": [g["day"]]}
+
+    def _enc(self, description: str | None) -> dict:
+        if not description:
+            return {"enabled": False, "key_id": None}
+        keys = self.state.setdefault("encryption_keys", {"ITGlue": "key-itglue-0001"})
+        if description not in keys:   # same rule as Get-HvboEncryptionKey: no key, no job
+            raise RuntimeError(f"Encryption key '{description}' must exist exactly once in VBR's key vault; found 0.")
+        return {"enabled": True, "key_id": keys[description]}
 
     def _find(self, job_id=None, name=None) -> dict | None:
         everything = self.state["jobs"] + self.state["foreign"] + self.state["copy_jobs"]
@@ -239,7 +277,8 @@ class MockBackend:
                         job = {"id": str(uuid.uuid4()), "name": op["job_name"], "description": op["description"],
                                "type": "Hyper-V Backup", "enabled": True, "schedule_enabled": bool(op.get("start_time")),
                                "start_time": op.get("start_time"), "retention_type": "Days",
-                               "retention_days": op["retention_days"], "repository": op["repository"], "objects": objs}
+                               "retention_days": op["retention_days"], "repository": op["repository"], "objects": objs,
+                               "gfs": self._gfs(op.get("gfs")), "encryption": self._enc(op.get("encryption_key"))}
                         st["jobs"].append(job)
                         res["messages"].append(f"Created job '{job['name']}' with {len(objs)} VM(s) on '{op['repository']}'.")
                 elif kind == "set_schedule":
@@ -252,9 +291,9 @@ class MockBackend:
                     for v in op["vms"]:
                         pts = st["points"].get(src["id"], [])
                         state = "no restore points to move"
-                        if op.get("remap") and v["name"] in pts:
-                            pts.remove(v["name"])
-                            st["points"].setdefault(job["id"], []).append(v["name"])
+                        if op.get("remap") and v["vm_guid"] in pts:   # found by VM ID, so renamed VMs keep history
+                            pts.remove(v["vm_guid"])
+                            st["points"].setdefault(job["id"], []).append(v["vm_guid"])
                             state = "restore points moved"
                         if not any(v["vm_guid"] in o["refs"] for o in job["objects"]):
                             job["objects"].append({"name": v["name"], "kind": "vm", "include": True, "refs": [v["vm_guid"]]})
@@ -271,15 +310,46 @@ class MockBackend:
                             raise RuntimeError("Copy target is the source job's own repository.")
                         job = {"id": str(uuid.uuid4()), "name": op["copy_name"], "description": op["description"],
                                "mode": op["mode"], "repository": op["repository"], "retention_days": op["retention_days"],
-                               "source": src["id"]}
+                               "source": src["id"], "gfs": self._gfs(op.get("gfs")),
+                               "encryption": self._enc(op.get("encryption_key"))}
                         st["copy_jobs"].append(job)
                         res["messages"].append(f"Created {op['mode']} backup copy job '{job['name']}' from '{src['name']}' "
                                                f"to '{op['repository']}', keeping {op['retention_days']} days.")
                         res["verify"] = {"retention_type": "RestoreDays", "retention_days": op["retention_days"], "mode": op["mode"]}
+                elif kind == "set_encryption":
+                    if op.get("job_kind") == "copy":
+                        job = self._owned(next((c for c in st["copy_jobs"] if c["id"] == op["job_id"]), None), "copy")
+                    else:
+                        job = self._owned(self._find(op["job_id"]))
+                    job["encryption"] = self._enc(op["encryption_key"])
+                    res["messages"].append(f"Backup files encrypted with key '{op['encryption_key']}'.")
+                elif kind == "set_gfs":
+                    if op.get("job_kind") == "copy":
+                        job = self._owned(next((c for c in st["copy_jobs"] if c["id"] == op["job_id"]), None), "copy")
+                    else:
+                        job = self._owned(self._find(op["job_id"]))
+                    job["gfs"] = self._gfs({"day": op["day"], "weeks": op["weeks"]})
+                    res["messages"].append(f"Weekly GFS: keep {op['weeks']} week(s), weekly full every {op['day']}.")
+                elif kind == "rename_job":
+                    if op.get("job_kind") == "copy":
+                        job = self._owned(next((c for c in st["copy_jobs"] if c["id"] == op["job_id"]), None), "copy")
+                    else:
+                        job = self._owned(self._find(op["job_id"]))
+                    clash = self._find(name=op["new_name"])
+                    if clash and clash is not job:
+                        raise RuntimeError(f"Another job is already called '{op['new_name']}'.")
+                    old_name, job["name"] = job["name"], op["new_name"]
+                    res["messages"].append(f"Renamed '{old_name}' to '{job['name']}'.")
+                elif kind == "remove_deleted_vms":
+                    job = self._owned(self._find(op["job_id"]))
+                    guids = {v["vm_guid"] for v in op["vms"]}
+                    before = len(job["objects"])
+                    job["objects"] = [o for o in job["objects"] if not (set(o["refs"]) & guids)]
+                    res["messages"].append(f"Removed {before - len(job['objects'])} deleted VM(s) from '{job['name']}'. Their restore points are kept.")
                 else:
                     raise RuntimeError(f"Unknown operation '{kind}'.")
                 res.update(job_id=job["id"], job_name=job["name"])
-                if kind in ("ensure_job", "set_schedule"):
+                if kind in ("ensure_job", "set_schedule") and "start_time" in job:
                     res["verify"] = {"start_time": job["start_time"], "schedule_enabled": job["schedule_enabled"],
                                      "retention_type": job["retention_type"], "retention_days": job["retention_days"],
                                      "object_count": len(job["objects"])}

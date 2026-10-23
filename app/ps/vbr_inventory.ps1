@@ -6,6 +6,7 @@ param([string]$InputJson)
 #   foreign_jobs  name, type and start time of every other job (VMware, Nutanix, agents...)
 #   all_job_names every job name on the server, so new names never collide
 Connect-HvboVbr
+$in = if ($InputJson) { $InputJson | ConvertFrom-Json } else { $null }
 
 $jobs = New-Object System.Collections.Generic.List[object]
 $foreign = New-Object System.Collections.Generic.List[object]
@@ -46,6 +47,8 @@ foreach ($j in @(Get-VBRJob -WarningAction SilentlyContinue)) {
         retention_type   = $ret.type
         retention_days   = $ret.days
         retention_points = $ret.points
+        gfs              = Get-HvboGfs $j
+        encryption       = Get-HvboEncryption $j
         repository       = $repo
         objects          = $objects
     })
@@ -64,7 +67,7 @@ try {
         try { $days = $c.RetentionNumber } catch { }
         $copies.Add([pscustomobject]@{
             id = "$($c.Id)"; name = $c.Name; description = $c.Description; mode = "$($c.Mode)"
-            repository = $target; retention_days = $days
+            repository = $target; retention_days = $days; gfs = Get-HvboGfs $c 'copy'; encryption = Get-HvboEncryption $c 'copy'
         })
     }
 } catch { }
@@ -82,7 +85,15 @@ foreach ($getter in 'Get-VBRComputerBackupJob', 'Get-VBRNASBackupJob', 'Get-VBRU
 
 $repos = @(Get-VBRBackupRepository | ForEach-Object { $_.Name }) + @(Get-VBRBackupRepository -ScaleOut | ForEach-Object { $_.Name })
 
+# The configured encryption key: how many keys match its description, and its ID when exactly one does.
+$encKey = $null
+if ($in -and $in.EncryptionKey) {
+    $keyHits = @(Get-VBREncryptionKey | Where-Object { "$($_.Description)" -eq "$($in.EncryptionKey)" })
+    $encKey = [ordered]@{ description = "$($in.EncryptionKey)"; count = $keyHits.Count
+                          id = $(if ($keyHits.Count -eq 1) { "$($keyHits[0].Id)" } else { $null }) }
+}
+
 [pscustomobject]@{
     jobs = $jobs.ToArray(); copy_jobs = $copies.ToArray(); foreign_jobs = $foreign.ToArray()
-    all_job_names = $names.ToArray(); repositories = $repos
+    all_job_names = $names.ToArray(); repositories = $repos; encryption_key = $encKey
 } | ConvertTo-Json -Depth 6 -Compress

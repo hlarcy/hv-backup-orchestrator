@@ -200,6 +200,12 @@ def build_plan(
     copy_jobs: list[dict] | None = None,
     foreign_jobs: list[dict] | None = None,
     all_job_names: list[str] | None = None,
+    all_vm_guids: list[str] | None = None,
+    known_cloud_names: dict[str, str] | None = None,
+    gfs_days: dict[str, str] | None = None,
+    gfs_applied: dict[str, str] | None = None,
+    encryption_key: dict | None = None,
+    enc_applied: dict[str, str] | None = None,
 ) -> dict:
     """Build the action plan.
 
@@ -208,6 +214,14 @@ def build_plan(
     foreign_jobs  Every other job on the VBR server (VMware, Nutanix, agents, copies...). Read only:
                   used for start-time reservation and display, never for actions.
     all_job_names Every job name on the server, so new names can never collide with an existing job.
+    all_vm_guids  Every VM ID in SCVMM (any cloud, host or library). A managed job object whose VM ID
+                  is not in here belongs to a deleted VM. None = unknown, so no clean-up is planned.
+    known_cloud_names  Cloud names seen on earlier runs, by cloud ID, to detect cloud renames.
+    gfs_days      Weekly GFS / synthetic full day already given to each job key (sticky, like start slots).
+    gfs_applied   "backup:<job id>" / "copy:<job id>" -> "Day/weeks" last applied, used when VBR does not
+                  expose the GFS settings in a readable form.
+    encryption_key  {description, count, id} for the configured vault key, from VBR.
+    enc_applied   "backup:<job id>" / "copy:<job id>" -> key description last applied (fallback, like gfs_applied).
     """
     slot_table = dict(slot_table or {})
     copy_jobs = copy_jobs or []
@@ -224,10 +238,8 @@ def build_plan(
     def cloud_name_of(cid: str) -> str:
         return cloud_by_id.get(cid, {}).get("name", cid)
 
-    def in_scope(cloud_name: str) -> bool:
-        if cfg.include_clouds and cloud_name not in cfg.include_clouds:
-            return False
-        return cloud_name not in cfg.exclude_clouds
+    def in_scope(cloud_id: str, cloud_name: str) -> bool:
+        return cfg.cloud_in_scope(cloud_id, cloud_name)
 
     # ---------------- ownership: only jobs carrying our marker are ever modified
     jobs_by_id = {j["id"]: j for j in jobs}
@@ -322,7 +334,7 @@ def build_plan(
                       and c["managed_key"].split("|")[0] == vm.get("cloud_id")]
         wrong_other = [c for c in managed_cover if c["managed_key"].split("|")[0] != vm.get("cloud_id")]
 
-        if not in_scope(cloud_name):
+        if not in_scope(vm.get("cloud_id"), cloud_name):
             row["status"] = "out_of_scope"
         elif vm.get("in_library"):
             row["status"] = "library"
@@ -363,7 +375,7 @@ def build_plan(
         t = cfg.tiers[tier]
         spec = {"job_key": key, "cloud_id": cloud_id, "cloud_name": cname, "tier": tier,
                 "tier_label": t.label, "retention_days": t.retention_days,
-                "repository": cfg.repository_for(cname, tier)}
+                "repository": cfg.repository_for(cloud_id, cname, tier)}
         if key in managed:
             j = managed[key]
             spec.update(job_id=j["id"], job_name=j["name"], exists=True, repository=j.get("repository") or spec["repository"])
@@ -423,6 +435,65 @@ def build_plan(
             a["blocked"] = "Backup window is full."
         actions.append(a)
 
+    # ---------------- weekly GFS + weekly synthetic full, one day per job, spread across the week
+    gfs_table: dict[str, str] = {}
+    weeks = cfg.gfs.weekly_keep_weeks
+    if cfg.gfs.enabled:
+        allowed = cfg.gfs.days
+        keys_all = sorted(set(managed) | creating, key=order_key)
+        for key in keys_all:                                  # 1. day already given to this job
+            d = (gfs_days or {}).get(key)
+            if d in allowed:
+                gfs_table[key] = d
+        for key in keys_all:                                  # 2. day the job already uses in VBR
+            g = (managed.get(key) or {}).get("gfs") or {}
+            if key not in gfs_table and g.get("weekly") and g.get("day") in allowed:
+                gfs_table[key] = g["day"]
+        used: dict[str, int] = defaultdict(int)
+        for d in gfs_table.values():
+            used[d] += 1
+        for key in keys_all:                                  # 3. least-used day for the rest
+            if key not in gfs_table:
+                d = min(allowed, key=lambda x: (used[x], allowed.index(x)))
+                gfs_table[key] = d
+                used[d] += 1
+        for a in actions:
+            if a["type"] == "create_job" or (a["type"] == "move_vms" and a.get("create_target")):
+                a["gfs"] = {"day": gfs_table[a["job_key"]], "weeks": weeks}
+
+        def gfs_ok(g: dict | None, applied: str | None, day: str, kind: str) -> tuple[bool, str]:
+            if g is None:   # VBR did not expose it: trust what we last applied
+                return applied == f"{day}/{weeks}", "GFS settings not readable; not yet applied by the orchestrator"
+            problems = []
+            if not (g.get("enabled") and g.get("weekly")):
+                problems.append("weekly GFS is off")
+            else:
+                if int(g.get("weeks") or 0) != weeks:
+                    problems.append(f"keeps {g.get('weeks')} week(s)")
+                if g.get("day") != day:
+                    problems.append(f"weekly day is {g.get('day') or 'unset'}")
+            if kind == "backup" and not (g.get("synthetic") and day in (g.get("synthetic_days") or [])):
+                problems.append("no weekly synthetic full on " + day)
+            return not problems, "; ".join(problems)
+
+        targets = [("backup", key, j) for key, j in managed.items()]
+        if cfg.backup_copy.enabled and cfg.gfs.copy_jobs:
+            targets += [("copy", key, c) for key, c in managed_copies.items()]
+        for kind, key, j in sorted(targets, key=lambda t: (order_key(t[1]), t[0])):
+            day = gfs_table.get(key)
+            if not day:
+                continue
+            ok, why = gfs_ok(j.get("gfs"), (gfs_applied or {}).get(f"{kind}:{j['id']}"), day, kind)
+            if ok:
+                continue
+            cloud_id, tier = key.split("|")
+            actions.append({
+                "id": uuid.uuid4().hex[:10], "type": "set_gfs", "auto": True, "job_key": key, "job_kind": kind,
+                "job_id": j["id"], "job_name": j["name"], "cloud_id": cloud_id, "cloud_name": cloud_name_of(cloud_id),
+                "tier": tier, "day": day, "weeks": weeks, "vms": [],
+                "reason": f"Weekly GFS, keep {weeks} week(s), {'synthetic full' if kind == 'backup' else 'weekly full'} "
+                          f"every {day} ({why})"})
+
     # ---------------- schedule drift on existing managed jobs
     for key, job in managed.items():
         slot = next((s for s, k in alloc.used.items() if k == key), None)
@@ -451,14 +522,15 @@ def build_plan(
             src_name = managed[key]["name"] if key in managed else new_names.get(key)
             if not src_name:
                 continue
-            target = cfg.copy_repository_for(cloud_name_of(cloud_id))
-            src_repo = managed[key].get("repository") if key in managed else cfg.repository_for(cloud_name_of(cloud_id), tier)
+            target = cfg.copy_repository_for(cloud_id, cloud_name_of(cloud_id))
+            src_repo = managed[key].get("repository") if key in managed else cfg.repository_for(cloud_id, cloud_name_of(cloud_id), tier)
             a = {"id": uuid.uuid4().hex[:10], "type": "create_copy", "auto": True, "job_key": key,
                  "cloud_id": cloud_id, "cloud_name": cloud_name_of(cloud_id), "tier": tier,
                  "source_job_id": managed[key]["id"] if key in managed else None, "source_job_name": src_name,
                  "job_id": None, "job_name": make_copy_name(cfg, src_name, cloud_name_of(cloud_id), tier, taken_names),
                  "repository": target, "retention_days": cfg.backup_copy.retention_days,
                  "mode": cfg.backup_copy.mode, "vms": [],
+                 "gfs": {"day": gfs_table[key], "weeks": weeks} if cfg.gfs.enabled and cfg.gfs.copy_jobs and key in gfs_table else None,
                  "description": f"Managed by HV Backup Orchestrator. Do not edit the marker. {copy_marker(cloud_id, tier)}",
                  "reason": f"Copy of '{src_name}' to {target or '(no target set)'}, {cfg.backup_copy.retention_days} days"}
             if not target:
@@ -466,6 +538,106 @@ def build_plan(
             elif src_repo and target.lower() == src_repo.lower():
                 a["blocked"] = f"Copy target '{target}' is the same repository as the source job."
             actions.append(a)
+
+    # ---------------- backup file encryption with the vault key on every managed job
+    enc = cfg.encryption
+    if enc.enabled:
+        k = encryption_key or {}
+        key_ok = k.get("count") == 1
+        key_problem = None
+        if not key_ok:
+            key_problem = (f"Encryption key '{enc.key_description}' "
+                           + ("not found" if not k.get("count") else f"matches {k.get('count')} keys")
+                           + " in VBR's key vault; no job is created or changed without it.")
+            warnings.append(key_problem)
+        for a in actions:
+            creates = a["type"] in ("create_job", "create_copy") or (a["type"] == "move_vms" and a.get("create_target"))
+            if creates:
+                a["encryption_key"] = enc.key_description
+                if not key_ok and not a.get("blocked"):
+                    a["blocked"] = key_problem
+        targets = [("backup", key, j) for key, j in managed.items()]
+        if cfg.backup_copy.enabled:
+            targets += [("copy", key, c) for key, c in managed_copies.items()]
+        for kind, key, j in sorted(targets, key=lambda t: (order_key(t[1]), t[0])):
+            e = j.get("encryption")
+            if e is None:
+                ok, why = (enc_applied or {}).get(f"{kind}:{j['id']}") == enc.key_description, "encryption settings not readable"
+            elif not e.get("enabled"):
+                ok, why = False, "not encrypted"
+            elif e.get("key_id") and k.get("id") and str(e["key_id"]).lower() != str(k["id"]).lower():
+                ok, why = False, "encrypted with a different key"
+            else:
+                ok, why = True, ""
+            if ok:
+                continue
+            cloud_id, tier = key.split("|")
+            a = {"id": uuid.uuid4().hex[:10], "type": "set_encryption", "auto": True, "job_key": key, "job_kind": kind,
+                 "job_id": j["id"], "job_name": j["name"], "cloud_id": cloud_id, "cloud_name": cloud_name_of(cloud_id),
+                 "tier": tier, "encryption_key": enc.key_description, "vms": [],
+                 "reason": f"Encrypt backup files with key '{enc.key_description}' ({why}). Veeam takes an active full on the next run."}
+            if not key_ok:
+                a["blocked"] = key_problem
+            actions.append(a)
+
+    # ---------------- deleted VMs: remove from our own jobs only
+    rename_names: set[str] = set()
+    if all_vm_guids is not None and cfg.cleanup.deleted_vms != "off":
+        alive = {g for g in (norm_guid(x) for x in all_vm_guids) if g}
+        if not alive:
+            warnings.append("SCVMM returned no VM IDs at all; deleted-VM clean-up skipped.")
+        else:
+            orphans: dict[str, list[dict]] = defaultdict(list)
+            for key, job in managed.items():
+                for o in job.get("objects") or []:
+                    if o.get("kind") != "vm" or not o.get("include", True):
+                        continue
+                    guids = {g for g in (norm_guid(r) for r in o.get("refs") or []) if g}
+                    if guids and not (guids & alive):   # no ID = cannot tell, so never treated as deleted
+                        orphans[key].append({"name": o.get("name"), "vm_guid": sorted(guids)[0]})
+            total = sum(len(v) for v in orphans.values())
+            too_many = total > cfg.cleanup.max_per_run
+            if too_many:
+                warnings.append(f"{total} VMs in managed jobs no longer exist in SCVMM, more than "
+                                f"cleanup.max_per_run ({cfg.cleanup.max_per_run}). Clean-up blocked; check SCVMM first.")
+            for key in sorted(orphans, key=order_key):
+                job = managed[key]
+                cloud_id, tier = key.split("|")
+                gone = orphans[key]
+                a = {"id": uuid.uuid4().hex[:10], "type": "remove_deleted", "auto": cfg.cleanup.deleted_vms == "auto",
+                     "job_key": key, "job_id": job["id"], "job_name": job["name"], "cloud_id": cloud_id,
+                     "cloud_name": cloud_name_of(cloud_id), "tier": tier, "vms": gone,
+                     "reason": f"{len(gone)} VM(s) no longer exist anywhere in SCVMM; their restore points are kept"}
+                if too_many:
+                    a["blocked"] = f"Too many deleted VMs in one run ({total} > {cfg.cleanup.max_per_run})."
+                actions.append(a)
+
+    # ---------------- cloud renamed: rename our jobs to match
+    if known_cloud_names and cfg.rename_jobs_on_cloud_rename != "off":
+        for cloud_id, old in known_cloud_names.items():
+            new = cloud_by_id.get(cloud_id, {}).get("name")
+            if not new or not old or new == old:
+                continue
+            ours = [("backup", k, j) for k, j in managed.items() if k.startswith(cloud_id + "|")]
+            ours += [("copy", k, c) for k, c in managed_copies.items() if k.startswith(cloud_id + "|")]
+            for kind, key, j in ours:
+                if old not in j["name"]:
+                    continue   # renamed by hand to something else: leave it
+                if old in new and new in j["name"]:
+                    continue   # already carries the new name (e.g. created after the rename)
+                target = BAD_NAME_CHARS.sub("-", j["name"].replace(old, new)).strip()
+                limit = cfg.job_name_max_length + (10 if kind == "copy" else 0)
+                target = target[:limit].strip()
+                a = {"id": uuid.uuid4().hex[:10], "type": "rename_job", "auto": cfg.rename_jobs_on_cloud_rename == "auto",
+                     "job_key": key, "job_kind": kind, "job_id": j["id"], "job_name": j["name"], "new_name": target,
+                     "cloud_id": cloud_id, "cloud_name": new, "tier": key.split("|")[1], "vms": [],
+                     "reason": f"Cloud renamed from '{old}' to '{new}'"}
+                if target.lower() in taken_names and target.lower() != j["name"].lower():
+                    a["blocked"] = f"Another job is already called '{target}'."
+                else:
+                    taken_names.add(target.lower())
+                    rename_names.add(target.lower())
+                actions.append(a)
 
     # ---------------- timeline and summary
     final_slots = {k: s for s, k in alloc.used.items()}
@@ -507,13 +679,14 @@ def build_plan(
                   "copy_job_ids": sorted(c["id"] for c in managed_copies.values()),
                   "foreign_names": sorted(taken_names - {j["name"].lower() for j in managed.values()}
                                           - {c["name"].lower() for c in managed_copies.values()}
-                                          - {n.lower() for n in new_names.values()}
+                                          - {n.lower() for n in new_names.values()} - rename_names
                                           - {a["job_name"].lower() for a in actions if a["type"] == "create_copy"})},
-        "copy_jobs": {k: {kk: v.get(kk) for kk in ("id", "name", "repository", "retention_days", "mode")}
+        "copy_jobs": {k: {kk: v.get(kk) for kk in ("id", "name", "repository", "retention_days", "mode", "gfs")}
                       for k, v in managed_copies.items()},
         "actions": actions,
         "vm_status": vm_status,
         "slot_table": final_slots,
+        "gfs_days": gfs_table,
         "timeline": timeline,
         "warnings": warnings,
     }

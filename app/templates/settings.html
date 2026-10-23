@@ -16,6 +16,14 @@
     <ul class="arrows"><li>Default: {{ cfg.default_repository }}</li>{% for d, r in cfg.retention_repositories.items() %}<li>{{ d }} days: {{ r }}</li>{% endfor %}{% for c, r in cfg.cloud_repositories.items() %}<li>{{ c }}: {{ r }}</li>{% endfor %}</ul>
     <h3 style="margin-top:14px">Backup copy</h3>
     <ul class="arrows">{% if cfg.backup_copy.enabled %}<li>{{ cfg.backup_copy.mode }} copy of every managed job to <b>{{ cfg.backup_copy.target_repository or 'not set' }}</b>, {{ cfg.backup_copy.retention_days }} days</li>{% else %}<li>Off</li>{% endif %}</ul>
+    <h3 style="margin-top:14px">Housekeeping and alerts</h3>
+    <ul class="arrows">
+      <li>Deleted VMs: {{ {'approve': 'removed from managed jobs after approval', 'auto': 'removed from managed jobs automatically', 'off': 'left in their jobs'}.get(cfg.cleanup.deleted_vms, cfg.cleanup.deleted_vms) }} (restore points are always kept)</li>
+      <li>Cloud renamed: {{ {'approve': 'managed jobs renamed after approval', 'auto': 'managed jobs renamed automatically', 'off': 'job names left as they are'}.get(cfg.rename_jobs_on_cloud_rename, cfg.rename_jobs_on_cloud_rename) }}</li>
+      <li>Encryption: {{ ('every backup and copy job, key "' ~ cfg.encryption.key_description ~ '" from the VBR key vault; no key, no new job') if cfg.encryption.enabled else 'off' }}</li>
+      <li>Weekly GFS: {{ ('on, keep ' ~ cfg.gfs.weekly_keep_weeks ~ ' week(s), synthetic full on a day per job from ' ~ cfg.gfs.days|join(', ') ~ (', copy jobs too' if cfg.gfs.copy_jobs else '')) if cfg.gfs.enabled else 'off' }}</li>
+      <li>Email: {{ 'to ' ~ cfg.email.to|join(', ') if cfg.email.enabled and cfg.email.to else 'off' }}</li>
+    </ul>
     <h3 style="margin-top:14px">Remote hosts</h3>
     <ul class="arrows">
       <li>SCVMM: {{ cfg.scvmm.host if cfg.scvmm else 'not set' }}</li>

@@ -96,6 +96,81 @@ function Get-HvboJobTime($j) {
     return $null
 }
 
+# Value at a dotted property path, or $null. Read only.
+function Get-HvboProp($o, [string]$Path) {
+    $v = $o
+    foreach ($part in $Path.Split('.')) {
+        if ($null -eq $v) { return $null }
+        try { $v = $v.$part } catch { return $null }
+    }
+    return $v
+}
+
+# The one encryption key in VBR's key vault (Password Manager) whose description matches exactly.
+# Read only. Throws unless exactly one matches, so a job is never created unencrypted or with the wrong key.
+function Get-HvboEncryptionKey([string]$Description) {
+    $keys = @(Get-VBREncryptionKey | Where-Object { "$($_.Description)" -eq $Description })
+    if ($keys.Count -ne 1) {
+        throw "Encryption key '$Description' must exist exactly once in VBR's key vault; found $($keys.Count)."
+    }
+    return $keys[0]
+}
+
+# Encryption state of a backup job or a backup copy job: @{ enabled; key_id } or $null if unreadable. Read only.
+function Get-HvboEncryption($j, [string]$Kind = 'backup') {
+    try {
+        if ($Kind -eq 'copy') {
+            $s = Get-HvboProp $j 'StorageOptions'
+            if (-not $s) { return $null }
+            $en = $null
+            foreach ($p in 'EnableEncryption', 'EncryptionEnabled', 'StorageEncryptionEnabled') {
+                if ($s.PSObject.Properties[$p]) { $en = [bool]$s.$p; break }
+            }
+            if ($null -eq $en) { return $null }
+            $kid = $null
+            foreach ($p in 'EncryptionKey.Id', 'EncryptionKeyId', 'KeyId') { if (-not $kid) { $kid = Get-HvboProp $s $p } }
+            return [ordered]@{ enabled = $en; key_id = $(if ($kid) { "$kid" } else { $null }) }
+        }
+        $o = Get-VBRJobOptions -Job $j
+        $en = Get-HvboProp $o 'BackupStorageOptions.StorageEncryptionEnabled'
+        if ($null -eq $en) { return $null }
+        $kid = $null
+        foreach ($p in 'UserCryptoKey.Id', 'Info.PwdKeyId', 'Info.CryptoKeyId') { if (-not $kid) { $kid = Get-HvboProp $j $p } }
+        if ("$kid" -eq '00000000-0000-0000-0000-000000000000') { $kid = $null }
+        return [ordered]@{ enabled = [bool]$en; key_id = $(if ($kid) { "$kid" } else { $null }) }
+    } catch { return $null }
+}
+
+# GFS weekly + synthetic full state of a backup job, or of a backup copy job. Read only.
+# Returns $null when this Veeam build does not expose the settings in a readable form.
+function Get-HvboGfs($j, [string]$Kind = 'backup') {
+    try {
+        if ($Kind -eq 'copy') {
+            $g = $null
+            foreach ($p in 'GFSOptions', 'GfsOptions', 'GFSRetentionOptions') { if (-not $g) { try { $g = $j.$p } catch { } } }
+            if (-not $g) { return $null }
+            $w = $g.GFSWeeklyOptions; if (-not $w) { $w = $g.WeeklyOptions }
+            if (-not $w) { return $null }
+            $en = $null
+            foreach ($p in 'IsEnabled', 'Enabled', 'EnableRetention') {
+                if ($w.PSObject.Properties[$p]) { $en = [bool]$w.$p; break }
+            }
+            if ($null -eq $en) { return $null }   # cannot tell: the planner falls back to what it last applied
+            # Copy jobs build their weekly GFS full themselves on the selected day; no separate synthetic setting.
+            return [ordered]@{ enabled = $en; weekly = $en; weeks = $w.RetentionPeriod; day = "$($w.SelectedDay)"
+                               synthetic = $true; synthetic_days = @("$($w.SelectedDay)") }
+        }
+        $o = Get-VBRJobOptions -Job $j
+        $gp = $o.GfsPolicy; $bt = $o.BackupTargetOptions
+        if (-not $gp -or -not $bt) { return $null }
+        return [ordered]@{
+            enabled = [bool]$gp.IsEnabled; weekly = [bool]$gp.Weekly.IsEnabled
+            weeks = $gp.Weekly.KeepBackupsForNumberOfWeeks; day = "$($gp.Weekly.DesiredTime)"
+            synthetic = [bool]$bt.TransformFullToSyntethic; synthetic_days = @($bt.TransformToSyntethicDays | ForEach-Object { "$_" })
+        }
+    } catch { return $null }
+}
+
 function Get-HvboRetention($j) {
     $r = [ordered]@{ type = $null; days = $null; points = $null }
     try {

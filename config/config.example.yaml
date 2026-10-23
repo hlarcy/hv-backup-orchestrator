@@ -68,6 +68,8 @@ backup_copy:
   retention_days: 7
   mode: Immediate                     # Immediate (copies each new restore point) | Periodic
   name_template: "{job} Copy"         # tokens: {job} {cloud} {tier} {tier_label}
+  compression: Auto                   # copy job storage settings, applied with encryption
+  storage_optimization: LocalTarget   # LocalTarget | LocalTargetHugeBackup | LANTarget | WANTarget | Automatic
 
 safety:
   reserve_foreign_job_times: true     # never start a managed job in the same 3 minutes as a VMware/Nutanix/other job
@@ -82,6 +84,44 @@ cloud_repositories: {}           # per-cloud override, e.g. {"Acme Legal": "REPO
 cloud_tier_repositories: {}      # per cloud and retention, e.g. {"Acme Legal": {365: "REPO-ACME-LTR"}}
 include_clouds: []               # empty = all clouds
 exclude_clouds: []               # e.g. ["Infrastructure"]
+# Per-cloud settings above (cloud_repositories, cloud_tier_repositories, include/exclude_clouds and
+# backup_copy.cloud_repositories) accept the SCVMM cloud ID as well as its name. Use the ID so a
+# renamed cloud keeps its settings: (Get-SCCloud -Name "Acme Legal").ID
+rename_jobs_on_cloud_rename: approve   # approve | auto | off: rename our jobs when their cloud is renamed
+
+# ---------------------------------------------------------------- encryption
+encryption:
+  enabled: true                  # every backup job AND copy job the app manages is encrypted
+  key_description: ITGlue        # description of the key in VBR's key vault (Password Manager), matched exactly;
+                                 # if it is missing or not unique, no job is created or changed
+
+# ---------------------------------------------------------------- weekly GFS + synthetic fulls
+gfs:
+  enabled: true                  # "Keep certain full backups longer for archival purposes", weekly
+  weekly_keep_weeks: 1           # "Keep weekly full backups for N weeks"
+  days: [Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday]   # days the app spreads jobs across
+  copy_jobs: true                # copy jobs too, on the same day as their source job
+
+# ---------------------------------------------------------------- deleted VMs
+cleanup:
+  deleted_vms: approve           # approve | auto | off: remove VMs that no longer exist anywhere in SCVMM from our jobs
+  max_per_run: 20                # more than this at once looks like an inventory problem, so it is blocked
+
+# ---------------------------------------------------------------- email alerts
+email:
+  enabled: false
+  host: smtp.arc.local
+  port: 587
+  security: starttls             # starttls | ssl (usually port 465) | none
+  username: null                 # or SMTP_USERNAME in .env; password is SMTP_PASSWORD in .env
+  sender: hvbo@arcsystems.co.uk
+  to: [backups@arcsystems.co.uk]
+  subject_prefix: "[HVBO]"
+  app_url: null                  # e.g. https://hvbo.arc.local, for links in emails
+  on_change: true                # jobs created or changed (and failures while applying)
+  on_attention: true             # actions waiting for approval or blocked
+  on_failure: true               # a run failed, e.g. SCVMM or VBR unreachable
+  reminder_hours: 24             # repeat an unchanged attention/failure alert after this long; 0 = never
 
 # ---------------------------------------------------------------- schedule
 schedule:

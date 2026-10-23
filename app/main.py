@@ -188,7 +188,9 @@ def run_page(run_id: int, request: Request, user: str = Depends(who)):
 
 @app.get("/diagnostics", response_class=HTMLResponse)
 def diagnostics(request: Request, user: str = Depends(who)):
-    return templates.TemplateResponse(request, "diagnostics.html", {**ctx(request), "probe": store.get("last_probe")})
+    return templates.TemplateResponse(request, "diagnostics.html", {**ctx(request), "probe": store.get("last_probe"),
+                                                                 "email_last": store.get("email_last"),
+                                                                 "email_ready": engine.notifier.configured})
 
 
 @app.get("/safety", response_class=HTMLResponse)
@@ -233,6 +235,12 @@ def action_toggle(key: str = Form(...), user: str = Depends(who)):
         raise HTTPException(400)
     log.info("%s toggled %s", user, key)
     return RedirectResponse("/", 303)
+
+
+@app.post("/actions/test-email")
+def action_test_email(user: str = Depends(who)):
+    engine.notifier.send_test()
+    return RedirectResponse("/diagnostics", 303)
 
 
 @app.post("/actions/probe")

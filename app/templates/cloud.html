@@ -20,6 +20,9 @@
         <li>{{ j.name }}{% if j.planned %} <span class="pill warn">planned</span>{% endif %}</li>
         <li>Daily at {{ j.start_time or 'not scheduled' }}</li>
         <li>Retention {{ j.retention_days or cfg.tiers[t].retention_days }} days</li>
+        {% set gd = (plan.gfs_days or {}).get(cloud.id ~ '|' ~ t) %}
+        {% if cfg.encryption.enabled %}<li>Encrypted with key "{{ cfg.encryption.key_description }}"</li>{% endif %}
+        {% if cfg.gfs.enabled and gd %}<li>Weekly GFS, keep {{ cfg.gfs.weekly_keep_weeks }} week(s), synthetic full every {{ gd }}</li>{% endif %}
         <li>{{ j.vm_count }} object(s){% if j.repository %} on {{ j.repository }}{% endif %}</li>
         {% set cp = cloud.copies.get(t) %}
         {% if cfg.backup_copy.enabled %}<li>{% if cp %}Backup copy {{ cp.name }}{% if cp.planned %} (planned){% endif %}, {{ cp.retention_days or cfg.backup_copy.retention_days }} days on {{ cp.repository }}{% else %}No backup copy job yet{% endif %}</li>{% endif %}

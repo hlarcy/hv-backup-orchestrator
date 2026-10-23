@@ -3,11 +3,11 @@
   <tbody>
   {% for a in actions %}
     <tr>
-      <td><b>{{ {'create_job': 'Create job', 'add_vms': 'Add VMs', 'move_vms': 'Move VMs and backups' if a.remap_backups else 'Move VMs', 'set_schedule': 'Fix schedule', 'create_copy': 'Create copy job'}[a.type] }}</b></td>
-      <td>{{ a.job_name }}{% if a.from_job_name %}<div class="small muted">from {{ a.from_job_name }}</div>{% endif %}{% if a.source_job_name %}<div class="small muted">copies {{ a.source_job_name }}</div>{% endif %}</td>
+      <td><b>{{ {'create_job': 'Create job', 'add_vms': 'Add VMs', 'move_vms': 'Move VMs and backups' if a.remap_backups else 'Move VMs', 'set_schedule': 'Fix schedule', 'create_copy': 'Create copy job', 'rename_job': 'Rename job', 'remove_deleted': 'Remove deleted VMs', 'set_gfs': 'Set weekly GFS', 'set_encryption': 'Turn on encryption'}.get(a.type, a.type) }}</b></td>
+      <td>{{ a.job_name }}{% if a.new_name %}<div class="small muted">to {{ a.new_name }}</div>{% endif %}{% if a.from_job_name %}<div class="small muted">from {{ a.from_job_name }}</div>{% endif %}{% if a.source_job_name %}<div class="small muted">copies {{ a.source_job_name }}</div>{% endif %}</td>
       <td>{{ a.cloud_name }}</td>
       <td><span class="tag {{ 'large' if a.tier in cfg.tiers and cfg.tiers[a.tier].retention_days > cfg.tiers[cfg.default_tier].retention_days else 'standard' }}">{{ cfg.tiers[a.tier].retention_days ~ ' days' if a.tier in cfg.tiers else a.tier }}</span>{% if a.type == 'create_copy' %} <span class="tag exclude">{{ a.retention_days }}d copy</span>{% endif %}</td>
-      <td>{{ a.start_time or '' }}</td>
+      <td>{{ a.start_time or '' }}{% if a.gfs %}<div class="small muted">GFS {{ a.gfs.day[:3] }}</div>{% elif a.day %}<div class="small muted">GFS {{ a.day[:3] }}</div>{% endif %}</td>
       <td>{{ a.repository or '' }}</td>
       <td class="num">{{ a.vms|length if a.vms else '' }}</td>
       <td class="small">{{ a.reason }}{% if a.vms %}<details><summary class="small">VMs</summary>{{ a.vms|map(attribute='name')|join(', ') }}</details>{% endif %}</td>

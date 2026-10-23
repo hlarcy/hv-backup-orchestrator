@@ -3,9 +3,11 @@ from app.planner import build_plan, classify, copy_marker, marker
 from app.slots import Window
 
 
-def cfg(copies=False, **kw):
+def cfg(copies=False, gfs=False, enc=False, **kw):
     c = AppConfig(default_repository="REPO", **kw)
     c.backup_copy = BackupCopyConfig(enabled=copies, target_repository="SOBR-COPY")
+    c.gfs.enabled = gfs          # most tests are about other things; GFS and encryption have their own tests
+    c.encryption.enabled = enc
     return c
 
 
@@ -238,3 +240,204 @@ def test_rebalance_longest_first():
     jobs = [job("s", "S", marker("c1", "d30"), "18:00"), job("l", "L", marker("c2", "d90"), "20:00"),
             job("y", "Y", marker("c1", "d365"), "21:00")]
     assert build_plan(c, CLOUDS, [], jobs, {}, rebalance=True)["slot_table"] == {"c1|d365": 0, "c2|d90": 1, "c1|d30": 2}
+
+
+# ---------------------------------------------------------------- deleted VMs, renames, cloud IDs
+
+def test_deleted_vm_removed_with_approval_by_default():
+    alive, gone = vm("a1"), vm("gone")
+    jobs = [job("j1", "HVBO C1 30d", marker("c1", "d30"), "18:00", [alive, gone])]
+    p = build_plan(cfg(), CLOUDS, [alive], jobs, {}, all_vm_guids=[alive["vm_guid"]])
+    a = [x for x in p["actions"] if x["type"] == "remove_deleted"]
+    assert len(a) == 1 and a[0]["auto"] is False and [v["name"] for v in a[0]["vms"]] == ["gone"]
+    c = cfg()
+    c.cleanup.deleted_vms = "auto"
+    assert build_plan(c, CLOUDS, [alive], jobs, {}, all_vm_guids=[alive["vm_guid"]])["actions"][0]["auto"] is True
+
+
+def test_vm_outside_any_cloud_is_not_deleted():
+    v = vm("a1")
+    jobs = [job("j1", "HVBO C1 30d", marker("c1", "d30"), "18:00", [v])]
+    p = build_plan(cfg(), CLOUDS, [], jobs, {}, all_vm_guids=[v["vm_guid"], "x"])   # moved out of the cloud
+    assert not [x for x in p["actions"] if x["type"] == "remove_deleted"]
+
+
+def test_no_cleanup_when_inventory_unknown_empty_or_huge_or_hand_built():
+    v = vm("a1")
+    jobs = [job("j1", "HVBO C1 30d", marker("c1", "d30"), "18:00", [v])]
+    assert not build_plan(cfg(), CLOUDS, [], jobs, {}, all_vm_guids=None)["actions"]
+    p = build_plan(cfg(), CLOUDS, [], jobs, {}, all_vm_guids=[])
+    assert not [x for x in p["actions"] if x["type"] == "remove_deleted"] and p["warnings"]
+    many = [vm(f"g{i}") for i in range(25)]
+    p = build_plan(cfg(), CLOUDS, [], [job("j1", "HVBO C1 30d", marker("c1", "d30"), "18:00", many)], {}, all_vm_guids=["x"])
+    assert all(x.get("blocked") for x in p["actions"] if x["type"] == "remove_deleted")
+    hb = [job("h", "Hand built", start="18:00", vms=[v])]
+    assert not build_plan(cfg(), CLOUDS, [], hb, {}, all_vm_guids=["x"])["actions"]
+
+
+def test_object_without_vm_id_never_treated_as_deleted():
+    jobs = [job("j1", "HVBO C1 30d", marker("c1", "d30"), "18:00")]
+    jobs[0]["objects"].append({"name": "noid", "kind": "vm", "include": True, "refs": []})
+    assert not build_plan(cfg(), CLOUDS, [], jobs, {}, all_vm_guids=["x"])["actions"]
+
+
+def test_renamed_vm_stays_protected_by_id():
+    v = vm("a1")
+    jobs = [job("j1", "HVBO C1 30d", marker("c1", "d30"), "18:00", [v])]
+    renamed = dict(v, name="a1-new")
+    p = build_plan(cfg(), CLOUDS, [renamed], jobs, {}, all_vm_guids=[v["vm_guid"]])
+    assert not p["actions"] and p["vm_status"][0]["status"] == "protected"
+
+
+def test_cloud_rename_renames_our_jobs_with_approval():
+    v = vm("a1")
+    jobs = [job("j1", "HVBO Old Co 30d", marker("c1", "d30"), "18:00", [v]),
+            job("j2", "Custom name", marker("c1", "d90"), "18:03")]
+    copies = [{"id": "cp1", "name": "HVBO Old Co 30d Copy", "description": copy_marker("c1", "d30")}]
+    clouds = [{"id": "c1", "name": "New Co"}]
+    p = build_plan(cfg(), clouds, [v], jobs, {}, copy_jobs=copies, known_cloud_names={"c1": "Old Co"})
+    r = {a["job_name"]: a for a in p["actions"] if a["type"] == "rename_job"}
+    assert set(r) == {"HVBO Old Co 30d", "HVBO Old Co 30d Copy"}        # hand-renamed job left alone
+    assert r["HVBO Old Co 30d"]["new_name"] == "HVBO New Co 30d" and r["HVBO Old Co 30d"]["auto"] is False
+    assert r["HVBO Old Co 30d Copy"]["job_kind"] == "copy"
+    assert "hvbo new co 30d" not in p["owned"]["foreign_names"]
+    c = cfg(rename_jobs_on_cloud_rename="off")
+    assert not [a for a in build_plan(c, clouds, [v], jobs, {}, known_cloud_names={"c1": "Old Co"})["actions"]
+                if a["type"] == "rename_job"]
+
+
+def test_cloud_rename_blocked_on_name_clash():
+    jobs = [job("j1", "HVBO Old 30d", marker("c1", "d30"), "18:00")]
+    p = build_plan(cfg(), [{"id": "c1", "name": "New"}], [], jobs, {}, known_cloud_names={"c1": "Old"},
+                   all_job_names=["HVBO New 30d"])
+    assert p["actions"][0]["blocked"]
+
+
+def test_config_by_cloud_id_survives_rename():
+    c = cfg(cloud_repositories={"c1": "REPO-C1"}, exclude_clouds=["c2"])
+    clouds = [{"id": "c1", "name": "Renamed"}, {"id": "c2", "name": "Also renamed"}]
+    vms = [dict(vm("a1"), cloud_name="Renamed"), dict(vm("b1", cloud="c2"), cloud_name="Also renamed")]
+    p = build_plan(c, clouds, vms, [], {})
+    creates = [a for a in p["actions"] if a["type"] == "create_job"]
+    assert [a["repository"] for a in creates] == ["REPO-C1"]
+    assert {r["status"] for r in p["vm_status"] if r["cloud_id"] == "c2"} == {"out_of_scope"}
+
+
+def test_cloud_rename_does_not_double_rename_jobs_already_using_new_name():
+    jobs = [job("j1", "HVBO Acme 30d", marker("c1", "d30"), "18:00"),
+            job("j2", "HVBO Acme Group 120d", marker("c1", "d120"), "18:03")]
+    p = build_plan(cfg(), [{"id": "c1", "name": "Acme Group"}], [], jobs, {}, known_cloud_names={"c1": "Acme"})
+    assert [(a["job_name"], a["new_name"]) for a in p["actions"] if a["type"] == "rename_job"] == [("HVBO Acme 30d", "HVBO Acme Group 30d")]
+    # shortening a name still works
+    jobs = [job("j1", "HVBO Acme Ltd 30d", marker("c1", "d30"), "18:00")]
+    p = build_plan(cfg(), [{"id": "c1", "name": "Acme"}], [], jobs, {}, known_cloud_names={"c1": "Acme Ltd"})
+    assert [a["new_name"] for a in p["actions"] if a["type"] == "rename_job"] == ["HVBO Acme 30d"]
+
+
+# ---------------------------------------------------------------- weekly GFS + synthetic full
+
+GOOD = lambda day: {"enabled": True, "weekly": True, "weeks": 1, "day": day, "synthetic": True, "synthetic_days": [day]}
+
+
+def test_new_jobs_get_weekly_gfs_on_spread_days():
+    vms = [vm("a1"), vm("a2", custom_property="90"), vm("b1", cloud="c2"), vm("b2", cloud="c2", custom_property="7")]
+    p = build_plan(cfg(gfs=True, copies=True), CLOUDS, vms, [], {})
+    creates = [a for a in p["actions"] if a["type"] == "create_job"]
+    days = [a["gfs"]["day"] for a in creates]
+    assert len(set(days)) == 4 and all(a["gfs"]["weeks"] == 1 for a in creates)
+    copies = {a["job_key"]: a["gfs"]["day"] for a in p["actions"] if a["type"] == "create_copy"}
+    assert copies == {a["job_key"]: a["gfs"]["day"] for a in creates}      # copy job uses its source's day
+
+
+def test_existing_job_without_gfs_is_fixed_and_keeps_its_day():
+    jobs = [job("j1", "HVBO C1 30d", marker("c1", "d30"), "18:00", [vm("a1")])]
+    jobs[0]["gfs"] = {"enabled": False, "weekly": False, "weeks": 1, "day": "Sunday", "synthetic": False, "synthetic_days": []}
+    p = build_plan(cfg(gfs=True), CLOUDS, [vm("a1")], jobs, {}, gfs_days={"c1|d30": "Wednesday"})
+    a = [x for x in p["actions"] if x["type"] == "set_gfs"]
+    assert len(a) == 1 and a[0]["day"] == "Wednesday" and a[0]["auto"] and "weekly GFS is off" in a[0]["reason"]
+    jobs[0]["gfs"] = GOOD("Wednesday")
+    assert not build_plan(cfg(gfs=True), CLOUDS, [vm("a1")], jobs, {}, gfs_days={"c1|d30": "Wednesday"})["actions"]
+
+
+def test_existing_correct_day_is_adopted_not_changed():
+    jobs = [job("j1", "HVBO C1 30d", marker("c1", "d30"), "18:00", [vm("a1")])]
+    jobs[0]["gfs"] = GOOD("Friday")
+    p = build_plan(cfg(gfs=True), CLOUDS, [vm("a1")], jobs, {})
+    assert not p["actions"] and p["gfs_days"] == {"c1|d30": "Friday"}
+
+
+def test_missing_synthetic_full_or_wrong_weeks_is_fixed():
+    jobs = [job("j1", "HVBO C1 30d", marker("c1", "d30"), "18:00", [vm("a1")])]
+    jobs[0]["gfs"] = dict(GOOD("Friday"), synthetic=False)
+    assert "no weekly synthetic full" in build_plan(cfg(gfs=True), CLOUDS, [vm("a1")], jobs, {})["actions"][0]["reason"]
+    jobs[0]["gfs"] = dict(GOOD("Friday"), weeks=4)
+    assert "keeps 4 week" in build_plan(cfg(gfs=True), CLOUDS, [vm("a1")], jobs, {})["actions"][0]["reason"]
+
+
+def test_unreadable_gfs_uses_applied_record():
+    jobs = [job("j1", "HVBO C1 30d", marker("c1", "d30"), "18:00", [vm("a1")])]
+    jobs[0]["gfs"] = None
+    p = build_plan(cfg(gfs=True), CLOUDS, [vm("a1")], jobs, {}, gfs_days={"c1|d30": "Monday"})
+    assert [a["type"] for a in p["actions"]] == ["set_gfs"]
+    p = build_plan(cfg(gfs=True), CLOUDS, [vm("a1")], jobs, {}, gfs_days={"c1|d30": "Monday"},
+                   gfs_applied={"backup:j1": "Monday/1"})
+    assert not p["actions"]
+
+
+def test_copy_jobs_get_gfs_too():
+    jobs = [job("j1", "HVBO C1 30d", marker("c1", "d30"), "18:00", [vm("a1")])]
+    jobs[0]["gfs"] = GOOD("Tuesday")
+    copies = [{"id": "cp1", "name": "HVBO C1 30d Copy", "description": copy_marker("c1", "d30"), "gfs": None}]
+    p = build_plan(cfg(gfs=True, copies=True), CLOUDS, [vm("a1")], jobs, {}, copy_jobs=copies)
+    a = p["actions"]
+    assert [(x["type"], x["job_kind"], x["day"]) for x in a] == [("set_gfs", "copy", "Tuesday")]
+
+
+def test_gfs_days_limited_to_configured_days():
+    c = cfg(gfs=True)
+    c.gfs.days = ["Saturday", "Sunday"]
+    vms = [vm("a1"), vm("a2", custom_property="90"), vm("b1", cloud="c2")]
+    days = [a["gfs"]["day"] for a in build_plan(c, CLOUDS, vms, [], {})["actions"] if a["type"] == "create_job"]
+    assert sorted(days) == ["Saturday", "Saturday", "Sunday"] or sorted(days) == ["Saturday", "Sunday", "Sunday"]
+
+
+# ---------------------------------------------------------------- encryption with the vault key
+
+KEY = {"description": "ITGlue", "count": 1, "id": "K1"}
+
+
+def test_new_backup_and_copy_jobs_carry_the_key():
+    p = build_plan(cfg(enc=True, copies=True), CLOUDS, [vm("a1")], [], {}, encryption_key=KEY)
+    creates = [a for a in p["actions"] if a["type"] in ("create_job", "create_copy")]
+    assert len(creates) == 2 and all(a["encryption_key"] == "ITGlue" and not a.get("blocked") for a in creates)
+
+
+def test_no_key_in_vault_blocks_every_new_job():
+    for k in (None, {"description": "ITGlue", "count": 0, "id": None}, {"description": "ITGlue", "count": 2, "id": None}):
+        p = build_plan(cfg(enc=True, copies=True), CLOUDS, [vm("a1")], [], {}, encryption_key=k)
+        creates = [a for a in p["actions"] if a["type"] in ("create_job", "create_copy")]
+        assert creates and all("ITGlue" in a["blocked"] for a in creates) and p["warnings"]
+
+
+def test_existing_unencrypted_or_wrong_key_jobs_are_fixed():
+    jobs = [job("j1", "HVBO C1 30d", marker("c1", "d30"), "18:00", [vm("a1")]),
+            job("j2", "HVBO C1 90d", marker("c1", "d90"), "18:03", [vm("a2", custom_property="90")])]
+    jobs[0]["encryption"] = {"enabled": False, "key_id": None}
+    jobs[1]["encryption"] = {"enabled": True, "key_id": "OTHER"}
+    copies = [{"id": "cp1", "name": "HVBO C1 30d Copy", "description": copy_marker("c1", "d30"),
+               "encryption": {"enabled": True, "key_id": "k1"}}]          # same key, different case: fine
+    p = build_plan(cfg(enc=True, copies=True), CLOUDS, [vm("a1"), vm("a2", custom_property="90")], jobs, {},
+                   copy_jobs=copies, encryption_key=KEY)
+    fixes = {(a["job_id"], a["job_kind"]): a["reason"] for a in p["actions"] if a["type"] == "set_encryption"}
+    assert set(fixes) == {("j1", "backup"), ("j2", "backup")}
+    assert "not encrypted" in fixes[("j1", "backup")] and "different key" in fixes[("j2", "backup")]
+    # j2's copy job is missing, so it is planned, with the key
+    assert [a["encryption_key"] for a in p["actions"] if a["type"] == "create_copy"] == ["ITGlue"]
+
+
+def test_unreadable_encryption_uses_applied_record():
+    jobs = [job("j1", "HVBO C1 30d", marker("c1", "d30"), "18:00", [vm("a1")])]
+    jobs[0]["encryption"] = None
+    assert [a["type"] for a in build_plan(cfg(enc=True), CLOUDS, [vm("a1")], jobs, {}, encryption_key=KEY)["actions"]] == ["set_encryption"]
+    assert not build_plan(cfg(enc=True), CLOUDS, [vm("a1")], jobs, {}, encryption_key=KEY,
+                          enc_applied={"backup:j1": "ITGlue"})["actions"]

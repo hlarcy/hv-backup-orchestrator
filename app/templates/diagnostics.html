@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Diagnostics<span class="dot">.</span></h1>
-<p class="lede">Tests PowerShell remoting to SCVMM and VBR and shows how this Veeam version exposes VM identifiers. Run it once after deployment and check that <b>refs</b> on the sample VM contains the Hyper-V VM GUID, which is how VMs are matched across tenants with the same VM names.</p>
+<p class="lede">Tests PowerShell remoting to SCVMM and VBR and shows how this Veeam version exposes VM identifiers. Run it once after deployment and check that <b>refs</b> on the sample VM, and on <b>sample_backup_object</b>, contain the Hyper-V VM GUID. VMs are matched by that ID, so same-named VMs in different tenants stay separate and renamed VMs keep their restore points when their retention changes.</p>
 <form method="post" action="/actions/probe"><button class="btn">Run connection test</button></form>
 {% if probe %}
   <p class="small muted">Last test {{ probe.at }} UTC.</p>
@@ -14,4 +14,17 @@
   {% endfor %}
   </div>
 {% endif %}
+<h2>Email alerts</h2>
+<div class="panel">
+  {% if email_ready %}
+    <p>Alerts go to <b>{{ cfg.email.to|join(', ') }}</b> from {{ cfg.email.sender }} via {{ cfg.email.host }}:{{ cfg.email.port }} ({{ cfg.email.security }}).
+      Sent for: {{ ['jobs created or changed' if cfg.email.on_change, 'actions needing attention' if cfg.email.on_attention, 'failed runs' if cfg.email.on_failure]|select|join(', ') }}.</p>
+  {% else %}
+    <p class="muted">Email is off or not fully configured. Set <code>email.enabled</code>, <code>host</code>, <code>sender</code> and <code>to</code> in config.yaml, and <code>SMTP_PASSWORD</code> in .env if the server needs a login.</p>
+  {% endif %}
+  <form method="post" action="/actions/test-email"><button class="btn ghost">Send test email</button></form>
+  {% if email_last %}<p class="small" style="margin-top:10px">Last email {{ email_last.at }} UTC: "{{ email_last.subject }}"
+    <span class="pill {{ 'ok' if email_last.ok else 'bad' }}">{{ 'Sent' if email_last.ok else 'Failed' }}</span>
+    {% if email_last.error %}<span class="muted">{{ email_last.error }}</span>{% endif %}</p>{% endif %}
+</div>
 {% endblock %}

@@ -154,3 +154,9 @@ def test_vbr_settings_injected_after_param_block():
 def test_ansi_codes_stripped():
     from app.remote import ANSI_RE
     assert ANSI_RE.sub("", "\x1b[31;1mConnect-VBRServer: \x1b[0mfailed") == "Connect-VBRServer: failed"
+
+
+def test_bridge_overrides_powershell7_endpoint():
+    from app.remote import effective_endpoint
+    assert effective_endpoint(RemoteHost(host="h", pwsh_bridge=True, configuration_name="PowerShell.7")) == "Microsoft.PowerShell"
+    assert effective_endpoint(RemoteHost(host="h", pwsh_bridge=False, configuration_name="PowerShell.7")) == "PowerShell.7"

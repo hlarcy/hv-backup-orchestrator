@@ -25,13 +25,20 @@
   {% endfor %}
 </div>
 
+{% if cfg.gfs.enabled and plan.gfs_days %}
+<h2>Weekly synthetic fulls</h2>
+<p class="small muted">Each job gets weekly GFS (keep {{ cfg.gfs.weekly_keep_weeks }} week(s)) and a synthetic full on one day, spread so the heavy weekly work does not all land on the same night. Copy jobs use their source job's day.</p>
+<div class="tiles">{% for d in cfg.gfs.days %}<div class="tile"><div class="k">{{ d }}</div><div class="v">{{ plan.gfs_days.values()|select('equalto', d)|list|length }}</div></div>{% endfor %}</div>
+{% endif %}
+
 <h2>Assigned start times</h2>
 <div class="tablewrap"><table>
-  <thead><tr><th>Start</th><th>Job</th><th>Cloud</th><th>Tier</th><th>State</th></tr></thead>
+  <thead><tr><th>Start</th><th>Job</th><th>Cloud</th><th>Retention</th><th>Weekly full</th><th>State</th></tr></thead>
   <tbody>
   {% for s in plan.timeline if s.state != 'free' %}
     <tr><td><b>{{ s.time }}</b></td><td>{{ s.job_name }}</td><td>{{ s.cloud_name or '' }}</td>
       <td>{% if s.tier %}<span class="tag {{ 'large' if s.tier in cfg.tiers and cfg.tiers[s.tier].retention_days > cfg.tiers[cfg.default_tier].retention_days else 'standard' }}">{{ cfg.tiers[s.tier].retention_days ~ ' days' if s.tier in cfg.tiers else s.tier }}</span>{% endif %}</td>
+      <td>{{ (plan.gfs_days or {}).get(s.job_key, '') if s.job_key else '' }}</td>
       <td>{{ {'managed': 'Managed', 'planned': 'Planned', 'reserved': 'Reserved'}[s.state] }}</td></tr>
   {% endfor %}
   </tbody>

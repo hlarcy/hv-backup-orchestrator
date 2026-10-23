@@ -18,7 +18,10 @@ $clouds = @(Get-SCCloud -VMMServer $vmm | ForEach-Object {
 })
 
 $vms = New-Object System.Collections.Generic.List[object]
+$allGuids = New-Object System.Collections.Generic.List[string]
+$noId = 0
 foreach ($vm in @(Get-SCVirtualMachine -VMMServer $vmm -All)) {
+    if ($vm.VMId) { $allGuids.Add("$($vm.VMId)") } else { $noId++ }   # every VM, in a cloud or not: used to spot deleted VMs
     if (-not $vm.Cloud) { continue }
 
     $maxBytes = [double]0; $usedBytes = [double]0
@@ -63,4 +66,4 @@ foreach ($vm in @(Get-SCVirtualMachine -VMMServer $vmm -All)) {
     })
 }
 
-[pscustomobject]@{ clouds = $clouds; vms = $vms.ToArray() } | ConvertTo-Json -Depth 5 -Compress
+[pscustomobject]@{ clouds = $clouds; vms = $vms.ToArray(); all_vm_guids = $allGuids.ToArray(); vms_without_id = $noId } | ConvertTo-Json -Depth 5 -Compress

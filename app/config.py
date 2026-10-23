@@ -80,11 +80,60 @@ class BackupCopyConfig:
     retention_days: int = 7
     mode: str = "Immediate"                  # Immediate | Periodic
     name_template: str = "{job} Copy"
+    compression: str = "Auto"                # copy job storage settings, needed when setting encryption:
+    storage_optimization: str = "LocalTarget"   # Auto|None|DedupeFriendly|Optimal|High|Extreme ; LocalTarget|LocalTargetHugeBackup|LANTarget|WANTarget|Automatic
 
 
 @dataclass
 class SafetyConfig:
     reserve_foreign_job_times: bool = True   # keep managed starts off minutes used by VMware/Nutanix/other jobs
+
+
+WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+@dataclass
+class GfsConfig:
+    # Weekly GFS ("Keep certain full backups longer for archival purposes") on every managed backup
+    # job and copy job, with a weekly synthetic full on the same day. Days are spread across jobs.
+    enabled: bool = True
+    weekly_keep_weeks: int = 1
+    days: list[str] = field(default_factory=lambda: list(WEEKDAYS))   # days the app may choose from
+    copy_jobs: bool = True           # also on backup copy jobs (same day as their source job)
+
+
+@dataclass
+class EncryptionConfig:
+    # Backup file encryption on every backup job and copy job the orchestrator manages, using the key
+    # in VBR's key vault (Password Manager) whose description matches exactly. No key, no new job.
+    enabled: bool = True
+    key_description: str = "ITGlue"
+
+
+@dataclass
+class CleanupConfig:
+    # VMs that no longer exist anywhere in SCVMM, removed from the orchestrator's own jobs only.
+    deleted_vms: str = "approve"     # approve | auto | off
+    max_per_run: int = 20            # more than this in one run looks like an inventory problem: blocked
+
+
+@dataclass
+class EmailConfig:
+    enabled: bool = False
+    host: str | None = None
+    port: int = 587
+    security: str = "starttls"       # starttls | ssl | none
+    username: str | None = None
+    password: str | None = None      # SMTP_PASSWORD in .env
+    sender: str | None = None
+    to: list[str] = field(default_factory=list)
+    subject_prefix: str = "[HVBO]"
+    app_url: str | None = None       # link back to the UI in emails, e.g. https://hvbo.arc.local
+    on_change: bool = True           # jobs created or changed (including failures while applying)
+    on_attention: bool = True        # actions waiting for approval, or blocked
+    on_failure: bool = True          # a run failed outright (e.g. cannot reach SCVMM or VBR)
+    reminder_hours: int = 24         # repeat an unchanged attention/failure alert after this long; 0 = never
+    timeout: int = 30
 
 
 @dataclass
@@ -112,14 +161,19 @@ class AppConfig:
     default_repository: str = "Default Backup Repository"
     cloud_repositories: dict[str, str] = field(default_factory=dict)
     cloud_tier_repositories: dict[str, dict[str, str]] = field(default_factory=dict)
-    exclude_clouds: list[str] = field(default_factory=list)
-    include_clouds: list[str] = field(default_factory=list)
+    exclude_clouds: list[str] = field(default_factory=list)   # cloud names or IDs
+    include_clouds: list[str] = field(default_factory=list)   # cloud names or IDs
+    rename_jobs_on_cloud_rename: str = "approve"   # approve | auto | off
     tiers: dict[str, TierConfig] = field(default_factory=dict)
     classification: ClassificationConfig = field(default_factory=ClassificationConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     retier: RetierConfig = field(default_factory=RetierConfig)
     backup_copy: BackupCopyConfig = field(default_factory=BackupCopyConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
+    gfs: GfsConfig = field(default_factory=GfsConfig)
+    encryption: EncryptionConfig = field(default_factory=EncryptionConfig)
+    email: EmailConfig = field(default_factory=EmailConfig)
     vbr: RemoteHost | None = None
     scvmm: RemoteHost | None = None
     scvmm_server_name: str = "localhost"
@@ -129,17 +183,37 @@ class AppConfig:
     def default_tier(self) -> str:
         return self.tier_for_days(self.default_retention_days)
 
-    def repository_for(self, cloud_name: str, tier: str) -> str:
+    @staticmethod
+    def _for_cloud(mapping: dict, cloud_id: str | None, cloud_name: str | None):
+        """Per-cloud settings may be keyed by cloud ID (survives renames) or by name. ID wins."""
+        if not mapping:
+            return None
+        if cloud_id:
+            lowered = {str(k).lower(): v for k, v in mapping.items()}
+            if str(cloud_id).lower() in lowered:
+                return lowered[str(cloud_id).lower()]
+        return mapping.get(cloud_name) if cloud_name else None
+
+    def cloud_matches(self, entries: list, cloud_id: str | None, cloud_name: str | None) -> bool:
+        wanted = {str(e).lower() for e in entries or []}
+        return bool({str(cloud_id or "").lower(), str(cloud_name or "").lower()} & wanted - {""})
+
+    def cloud_in_scope(self, cloud_id: str | None, cloud_name: str | None) -> bool:
+        if self.include_clouds and not self.cloud_matches(self.include_clouds, cloud_id, cloud_name):
+            return False
+        return not self.cloud_matches(self.exclude_clouds, cloud_id, cloud_name)
+
+    def repository_for(self, cloud_id: str | None, cloud_name: str | None, tier: str) -> str:
         days = self.tiers[tier].retention_days if tier in self.tiers else None
 
-        def lookup(mapping: dict):
+        def lookup(mapping: dict | None):
             for k in (tier, days, str(days)):
-                if k is not None and k in mapping:
+                if mapping and k is not None and k in mapping:
                     return mapping[k]
             return None
 
-        return (lookup(self.cloud_tier_repositories.get(cloud_name, {}))
-                or self.cloud_repositories.get(cloud_name)
+        return (lookup(self._for_cloud(self.cloud_tier_repositories, cloud_id, cloud_name))
+                or self._for_cloud(self.cloud_repositories, cloud_id, cloud_name)
                 or lookup(self.retention_repositories)
                 or self.default_repository)
 
@@ -154,8 +228,9 @@ class AppConfig:
         keys = list(keys if keys is not None else self.tiers)
         return sorted(keys, key=lambda k: (-(self.tiers[k].retention_days if k in self.tiers else 0), k))
 
-    def copy_repository_for(self, cloud_name: str) -> str | None:
-        return self.backup_copy.cloud_repositories.get(cloud_name) or self.backup_copy.target_repository
+    def copy_repository_for(self, cloud_id: str | None, cloud_name: str | None) -> str | None:
+        return (self._for_cloud(self.backup_copy.cloud_repositories, cloud_id, cloud_name)
+                or self.backup_copy.target_repository)
 
     def redacted(self) -> dict[str, Any]:
         """Config as a dict with secrets masked, for the settings page."""
@@ -165,6 +240,8 @@ class AppConfig:
         for key in ("vbr", "scvmm"):
             if d.get(key) and d[key].get("password"):
                 d[key]["password"] = "********"
+        if d.get("email", {}).get("password"):
+            d["email"]["password"] = "********"
         return d
 
 
@@ -204,6 +281,15 @@ def _remote(section: dict | None, prefix: str) -> RemoteHost | None:
         accept_local_tls_certificate=bool(section.get("accept_local_tls_certificate", True)),
         pwsh_path=section.get("pwsh_path") or r"C:\Program Files\PowerShell\7\pwsh.exe",
     )
+
+
+def _email(raw: dict) -> EmailConfig:
+    e = EmailConfig(**{k: v for k, v in raw.items() if k in EmailConfig.__dataclass_fields__ and k != "password"})
+    if isinstance(e.to, str):
+        e.to = [x.strip() for x in e.to.replace(";", ",").split(",") if x.strip()]
+    e.username = _secret("SMTP_USERNAME", e.username)
+    e.password = _secret("SMTP_PASSWORD")
+    return e
 
 
 def load_config(path: str | None = None) -> AppConfig:
@@ -248,11 +334,25 @@ def load_config(path: str | None = None) -> AppConfig:
         retier=ret,
         backup_copy=section(BackupCopyConfig, "backup_copy"),
         safety=section(SafetyConfig, "safety"),
+        cleanup=section(CleanupConfig, "cleanup"),
+        gfs=section(GfsConfig, "gfs"),
+        encryption=section(EncryptionConfig, "encryption"),
+        email=_email(raw.get("email") or {}),
+        rename_jobs_on_cloud_rename=str(raw.get("rename_jobs_on_cloud_rename", "approve")).lower(),
         vbr=_remote(raw.get("vbr"), "VBR"),
         scvmm=_remote(raw.get("scvmm"), "SCVMM"),
         scvmm_server_name=(raw.get("scvmm") or {}).get("vmm_server_name", "localhost"),
         source_path=path,
     )
+    days = [d.strip().capitalize() for d in cfg.gfs.days or WEEKDAYS]
+    bad = [d for d in days if d not in WEEKDAYS]
+    if bad:
+        raise ValueError(f"gfs.days has unknown day(s): {bad}")
+    cfg.gfs.days = [d for d in WEEKDAYS if d in days]
+    if cfg.gfs.weekly_keep_weeks < 1:
+        raise ValueError("gfs.weekly_keep_weeks must be 1 or more")
+    if cfg.encryption.enabled and not (cfg.encryption.key_description or "").strip():
+        raise ValueError("encryption.key_description must name the key in VBR's key vault")
     if cfg.default_retention_days <= 0:
         raise ValueError("default_retention_days must be a whole number above 0")
     cfg.tier_for_days(cfg.default_retention_days)

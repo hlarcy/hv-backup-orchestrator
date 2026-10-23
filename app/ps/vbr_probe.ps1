@@ -28,4 +28,13 @@ if ($job) {
         object = if ($o) { [ordered]@{ name = $o.Name; type = "$($o.Type)"; obj_type = "$($o.Object.Type)"; refs = Get-HvboRefs $o } } else { $null }
     }
 }
+$b = $null
+if ($job) { $b = Get-VBRBackup | Where-Object { "$($_.JobId)" -eq "$($job.Id)" } | Select-Object -First 1 }
+if ($b) {
+    $o = $null
+    try { $o = @($b.GetObjects())[0] } catch { }
+    if (-not $o) { try { $o = @(Get-VBRRestorePoint -Backup $b)[0] } catch { } }
+    # refs here must contain the Hyper-V VM ID for restore points to follow a renamed VM.
+    $out.sample_backup_object = if ($o) { [ordered]@{ backup = $b.Name; name = $o.Name; type = $o.GetType().Name; refs = Get-HvboRefs $o } } else { $null }
+}
 [pscustomobject]$out | ConvertTo-Json -Depth 6 -Compress

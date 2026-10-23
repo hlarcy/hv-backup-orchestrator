@@ -25,6 +25,15 @@ PLAN = {"owned": {"backup_job_ids": ["mine"], "copy_job_ids": ["mycopy"],
     {"op": "ensure_copy", "source_job_id": "vmware-job", "source_job_name": "x", "copy_name": "new"},
     {"op": "ensure_copy", "source_job_id": "mine", "source_job_name": "x", "copy_name": "NTNX-AHV-Nightly"},
     {"op": "remove_vms", "job_id": "mine"},
+    {"op": "rename_job", "job_kind": "backup", "job_id": "vmware-job", "new_name": "x"},
+    {"op": "rename_job", "job_kind": "copy", "job_id": "mine", "new_name": "x"},          # mine is a backup job
+    {"op": "rename_job", "job_kind": "backup", "job_id": "mine", "new_name": "VMW-Prod-SQL"},
+    {"op": "remove_deleted_vms", "job_id": "legacy", "vms": [{"vm_guid": "g"}]},
+    {"op": "set_gfs", "job_kind": "backup", "job_id": "vmware-job", "day": "Sunday", "weeks": 1},
+    {"op": "set_encryption", "job_kind": "backup", "job_id": "vmware-job", "encryption_key": "ITGlue"},
+    {"op": "set_encryption", "job_kind": "copy", "job_id": "mine", "encryption_key": "ITGlue"},
+    {"op": "set_gfs", "job_kind": "copy", "job_id": "foreign-copy", "day": "Sunday", "weeks": 1},
+    {"op": "remove_deleted_vms", "job_id": "mine", "vms": [{"name": "no id"}]},
     {"op": "delete_job", "job_id": "mine"},
 ])
 def test_validate_refuses_anything_not_ours(op):
@@ -38,6 +47,12 @@ def test_validate_allows_our_jobs_and_new_names():
         {"id": "2", "op": "ensure_job", "job_name": "HVBO New 30d", "vms": []},
         {"id": "3", "op": "retier_vm", "from_job_id": "mine", "job_name": "HVBO New 90d", "vms": []},
         {"id": "4", "op": "ensure_copy", "source_job_name": "HVBO New 30d", "copy_name": "HVBO New 30d Copy"},
+        {"id": "5", "op": "rename_job", "job_kind": "backup", "job_id": "mine", "new_name": "HVBO Renamed 30d"},
+        {"id": "6", "op": "rename_job", "job_kind": "copy", "job_id": "mycopy", "new_name": "HVBO Renamed 30d Copy"},
+        {"id": "7", "op": "remove_deleted_vms", "job_id": "mine", "vms": [{"vm_guid": "g", "name": "x"}]},
+        {"id": "8", "op": "set_gfs", "job_kind": "backup", "job_id": "mine", "day": "Sunday", "weeks": 1},
+        {"id": "9", "op": "set_gfs", "job_kind": "copy", "job_id": "mycopy", "day": "Sunday", "weeks": 1},
+        {"id": "10", "op": "set_encryption", "job_kind": "backup", "job_id": "mine", "encryption_key": "ITGlue"},
     ], PLAN)
 
 
@@ -50,7 +65,10 @@ def test_one_bad_op_stops_the_whole_batch():
 MUTATING = re.compile(r"\b(Add|Set|Remove|Enable|Disable|Start|Stop|Move|New|Copy|Update|Sync|Reset|Import|Export|Invoke)-VBR\w+", re.I)
 ALLOWED = {"add-vbrhvbackupjob", "add-vbrhvjobobject", "remove-vbrjobobject", "set-vbrjoboptions",
            "set-vbrjobvssoptions", "set-vbrjobschedule", "enable-vbrjobschedule", "add-vbrbackupcopyjob",
-           "move-vbrbackup"}
+           "move-vbrbackup", "set-vbrbackupcopyjob",
+           # These two only build an in-memory settings object for a copy job; they change nothing.
+           "new-vbrcomputergfsweeklyoptions", "new-vbrcomputergfsoptions", "new-vbrbackupcopyjobstorageoptions",
+           "set-vbrjobadvancedstorageoptions"}
 
 
 def test_powershell_uses_only_allowlisted_change_cmdlets():
@@ -67,7 +85,7 @@ def test_every_apply_operation_asserts_ownership_before_changing():
     text = (PS / "vbr_apply.ps1").read_text()
     blocks = re.split(r"\n\s{12}'(\w+)' \{", text)[1:]
     ops = dict(zip(blocks[0::2], blocks[1::2]))
-    assert set(ops) >= {"ensure_job", "set_schedule", "retier_vm", "ensure_copy"}
+    assert set(ops) >= {"ensure_job", "set_schedule", "retier_vm", "ensure_copy", "rename_job", "remove_deleted_vms", "set_gfs", "set_encryption"}
     for name, body in ops.items():
         first_change = MUTATING.search(body)
         first_assert = body.find("Assert-HvboOwned")
@@ -87,8 +105,8 @@ def test_end_to_end_mock_never_touches_vmware_or_nutanix(tmp_path):
     import copy, time
     before = copy.deepcopy(eng.backend.state["foreign"])
     legacy_before = copy.deepcopy([j for j in eng.backend.state["jobs"] if "[hvbo" not in j["description"]])
-    for _ in range(6):
-        rid = eng.start("test", "apply")
+    for _ in range(12):
+        rid = eng.start("test", "apply", include_manual=True)
         while eng.busy:
             time.sleep(0.02)
         run = eng.store.run(rid)

@@ -79,6 +79,43 @@ With `backup_copy.enabled: true`, each managed backup job, new or existing, gets
 
 Copy jobs are only created for the tool's own jobs, never for VMware, Nutanix or hand-built jobs. When a VM moves job, its copies in the old copy chain age out after 7 days and new copies come from the new job.
 
+## Encryption
+
+Every backup job and copy job the app manages encrypts its backup files with the key in VBR's key vault (Password Manager) whose description is `encryption.key_description` (default `ITGlue`).
+
+- The key is looked up by exact description, and must match exactly one key. If it is missing or ambiguous, every create is blocked (and an attention email goes out), so a job is never created unencrypted or with the wrong key. VMs added to existing jobs are unaffected.
+- On a new backup job the key is applied before the schedule is enabled, after any `template_job` options are copied, so a template cannot switch it off. Copy jobs get it at creation (`New-VBRBackupCopyJobStorageOptions -EnableEncryption -EncryptionKey`, which also sets `backup_copy.compression` and `storage_optimization`).
+- Every sync checks the live setting. An unencrypted managed job, or one using a different key, is fixed automatically (`Set-VBRJobAdvancedStorageOptions -EnableEncryption $true -EncryptionKey`). Veeam takes an active full the next time such a job runs.
+- Hand-built, VMware and Nutanix jobs are never touched.
+
+## Weekly GFS and synthetic fulls
+
+Every backup job and copy job the app manages has weekly GFS turned on ("Keep certain full backups longer for archival purposes", weekly, `gfs.weekly_keep_weeks`, default 1). Backup jobs also get a weekly synthetic full on the same day, so there is always a full for the weekly GFS point to use.
+
+- Each job gets one day, spread across the week (least-used day first, from `gfs.days`), so the synthetic fulls do not all land on the same night. A copy job uses its source job's day.
+- Days are sticky, like start times: adding a cloud never moves another job's day. A job that already has weekly GFS on an allowed day keeps it.
+- Every sync checks the live settings. If someone turns GFS off, changes the weeks, the day or the synthetic full, the app puts it back automatically (only on its own jobs). The Schedule page shows how many jobs land on each day.
+- Backup jobs use the job options (`GfsPolicy.Weekly`, `BackupTargetOptions.TransformFullToSyntethic` / `TransformToSyntethicDays`); copy jobs use `New-VBRComputerGFSOptions` on `Add-VBRBackupCopyJob` / `Set-VBRBackupCopyJob`. Both are read back after setting. If a Veeam build does not expose these settings in readable form, the app relies on what it last applied instead of re-applying every run.
+
+## Deleted, renamed and moved things
+
+| What changed | What the app does |
+|---|---|
+| VM deleted in SCVMM | Its VM ID is no longer anywhere in SCVMM, so it is removed from the app's own job (after approval by default, `cleanup.deleted_vms`). Only by VM ID, never by name. Restore points are kept and age out under Veeam's retention. Skipped if SCVMM reports no VMs, or any VM without an ID, and blocked if more than `cleanup.max_per_run` disappear at once. A VM that only left its cloud is not treated as deleted. |
+| VM renamed | Nothing to do: VMs are matched by VM ID. When its retention later changes, its restore points are found by VM ID too, so history moves with it even though Veeam still has it under the old name. |
+| `BackupTier` changed | Moved to the job for the new number with its restore points (see above). Lowering waits for approval unless `retier.auto_downgrade: true`. |
+| Cloud renamed | Jobs are tied to the cloud's ID, so nothing breaks. The app's jobs and copy jobs whose names contain the old cloud name are renamed (after approval by default, `rename_jobs_on_cloud_rename`); jobs you renamed by hand are left alone. Per-cloud config keyed by ID keeps working; config keyed by name needs updating. |
+
+Renaming a Hyper-V backup job uses Veeam's documented workaround (`$job.Info.CommonInfo.Name` then `Update()`), because there is no supported rename cmdlet for that job type. The result is read back and reported. Copy jobs are renamed with `Set-VBRBackupCopyJob -Name`.
+
+## Email alerts
+
+Set `email.enabled: true` with `host`, `sender` and `to` (and `SMTP_PASSWORD` in `.env` if needed), then use Send test email on the Diagnostics page.
+
+- Change: every run that created or changed something in VBR, with what was done, the values read back from VBR, and any failures.
+- Attention: actions waiting for approval, blocked actions, and, while auto-apply is off, changes waiting to be applied. Sent when the list changes, and again every `reminder_hours` while unchanged.
+- Failure: a run that could not finish (for example SCVMM or VBR unreachable). Sent when the error changes, then as a reminder; cleared by the next good run.
+
 ## How "already backed up" is decided
 
 A VM counts as protected if any Hyper-V backup job in VBR contains it:
@@ -179,6 +216,7 @@ These scripts were written against the documented VBR 12/13 PowerShell object mo
 
 - `Move-VBRBackup` on a test VM: set its BackupTier to a new number and confirm its restore points appear under the new job and the VM is then removed from the old one.
 - `Add-VBRBackupCopyJob` creates the copy job with 7 days on the copy SOBR (the run page shows the read-back).
+- Open one new backup job and one copy job in the console: Storage, Advanced, Storage should show encryption with the ITGlue key, and Storage, Configure GFS should show weekly, 1 week, on the day the Schedule page lists, and the backup job's Advanced settings should show a weekly synthetic full on that day.
 - The Isolation page lists your VMware and Nutanix jobs. If one is missing it is still never changed (only marked jobs are), but its start time will not be avoided.
 - `Get-VBRJobObject` exposes the VM GUID in one of the probed properties (`app/ps/vbr_common.ps1`, `Get-HvboRefs`). If it does not, matching falls back to unique names and the run log will say so.
 - Retention is written as days. The app sets `BackupStorageOptions.RetentionType = Days` and `RetainDaysToKeep`. The run page shows the read-back value; if it shows restore points instead, adjust `Set-HvboRetention` in `app/ps/vbr_apply.ps1`.
@@ -199,6 +237,7 @@ HVBO_MOCK=true HVBO_CONFIG=config/config.example.yaml HVBO_DATA_DIR=./data \
 | `app/slots.py` | 18:00 to 00:00 window and 3-minute slots |
 | `app/engine.py` | Discover, plan, apply in three phases (jobs, tier moves, copy jobs); run lock and history |
 | `app/safety.py` | Ownership guard checked before anything is sent to VBR |
+| `app/notify.py` | SMTP email alerts |
 | `app/backend.py` | Live PSRP backend and mock estate |
 | `app/ps/*.ps1` | PowerShell run on SCVMM and VBR |
 | `app/main.py` | Web UI and JSON API (`/api/status`, `/api/plan`, `/api/docs`) |

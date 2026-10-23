@@ -56,6 +56,25 @@ def validate_ops(ops: list[dict], plan: dict) -> None:
             if op.get("copy_job_id") and op["copy_job_id"] not in owned_copy:
                 problems.append(f"ensure_copy {op.get('id')}: copy job {op['copy_job_id']} is not managed here")
             check_new_name(op.get("copy_name"), op)
+        elif kind == "rename_job":
+            ids = owned_copy if op.get("job_kind") == "copy" else owned_backup
+            if not op.get("job_id") or op["job_id"] not in ids:
+                problems.append(f"rename_job {op.get('id')}: job {op.get('job_id')} is not an orchestrator-managed job")
+            check_new_name(op.get("new_name"), op)
+        elif kind == "set_encryption":
+            ids = owned_copy if op.get("job_kind") == "copy" else owned_backup
+            if not op.get("job_id") or op["job_id"] not in ids:
+                problems.append(f"set_encryption {op.get('id')}: job {op.get('job_id')} is not an orchestrator-managed job")
+        elif kind == "set_gfs":
+            ids = owned_copy if op.get("job_kind") == "copy" else owned_backup
+            if not op.get("job_id") or op["job_id"] not in ids:
+                problems.append(f"set_gfs {op.get('id')}: job {op.get('job_id')} is not an orchestrator-managed job")
+        elif kind == "remove_deleted_vms":
+            if not op.get("job_id"):
+                problems.append(f"remove_deleted_vms {op.get('id')}: job id required")
+            check_existing(op.get("job_id"), "job", op)
+            if any(not v.get("vm_guid") for v in op.get("vms") or []):
+                problems.append(f"remove_deleted_vms {op.get('id')}: every VM must be identified by VM ID")
         else:
             problems.append(f"Unknown operation '{kind}'")
 

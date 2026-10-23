@@ -11,6 +11,7 @@ from .backend import make_backend
 from .config import AppConfig
 from .db import Store
 from .planner import build_plan
+from .notify import Notifier
 from .safety import validate_ops
 
 log = logging.getLogger("hvbo.engine")
@@ -35,6 +36,7 @@ class Engine:
         self.cfg = cfg
         self.store = store
         self.backend = make_backend(cfg)
+        self.notifier = Notifier(cfg, store)
         self._lock = threading.Lock()
         self.current_run: int | None = None
 
@@ -88,10 +90,12 @@ class Engine:
             summary = {**plan["summary"], "applied": sum(1 for r in results if r.get("ok")),
                        "failed": sum(1 for r in results if not r.get("ok"))}
             self.store.finish_run(run_id, status, summary=summary, results=results, log=rl.text())
+            self.notifier.after_run(run_id, trigger, mode, plan, results, include_manual)
         except Exception as exc:  # noqa: BLE001
             rl(f"ERROR: {exc}")
             log.error(traceback.format_exc())
             self.store.finish_run(run_id, "failed", error=str(exc), log=rl.text())
+            self.notifier.run_failed(run_id, trigger, mode, str(exc))
         finally:
             self.current_run = None
             self.store.prune()
@@ -100,8 +104,10 @@ class Engine:
     def _discover_and_plan(self, rl: RunLog, rebalance: bool) -> dict:
         t = time.monotonic()
         rl(f"Discovering SCVMM clouds and VMs ({self.backend.name})")
-        clouds, vms = self.backend.scvmm_inventory()
+        clouds, vms, all_guids = self.backend.scvmm_inventory()
         rl(f"SCVMM: {len(clouds)} clouds, {len(vms)} cloud VMs ({time.monotonic() - t:.1f}s)")
+        if all_guids is None:
+            rl("Deleted-VM check skipped: SCVMM did not report an ID for every VM.")
         t = time.monotonic()
         rl("Reading Veeam jobs (read only)")
         inv = self.backend.vbr_inventory()
@@ -112,7 +118,11 @@ class Engine:
 
         plan = build_plan(self.cfg, clouds, vms, jobs, self.store.slot_table(), rebalance=rebalance,
                           copy_jobs=inv["copy_jobs"], foreign_jobs=inv["foreign_jobs"],
-                          all_job_names=inv["all_job_names"])
+                          all_job_names=inv["all_job_names"], all_vm_guids=all_guids,
+                          known_cloud_names=self.store.get("cloud_names", {}),
+                          gfs_days=self.store.get("gfs_days", {}), gfs_applied=self.store.get("gfs_applied", {}),
+                          encryption_key=inv.get("encryption_key"), enc_applied=self.store.get("enc_applied", {}))
+        self._remember_cloud_names(clouds, plan, rl)
         repo_names = {r.lower() for r in repos}
         for a in plan["actions"]:
             if a.get("blocked") or not repo_names:
@@ -135,7 +145,23 @@ class Engine:
         existing = {j.get("managed_key") for j in jobs if j.get("managed_key")}
         if not rebalance:
             self.store.save_slots({k: s for k, s in plan["slot_table"].items() if k in existing})
+        days = dict(self.store.get("gfs_days", {}))
+        days.update({k: d for k, d in plan.get("gfs_days", {}).items() if k in existing})
+        self.store.set("gfs_days", days)
         return plan
+
+    def _remember_cloud_names(self, clouds: list[dict], plan: dict, rl: RunLog) -> None:
+        """Keep the last known name per cloud ID. A renamed cloud keeps its old name on record
+        until its jobs have been renamed (or renaming is off), so the rename stays visible."""
+        known = dict(self.store.get("cloud_names", {}))
+        pending = {a["cloud_id"] for a in plan["actions"] if a["type"] == "rename_job"}
+        for c in clouds:
+            old = known.get(c["id"])
+            if old and old != c["name"]:
+                rl(f"Cloud renamed: '{old}' is now '{c['name']}'.")
+            if c["id"] not in pending:
+                known[c["id"]] = c["name"]
+        self.store.set("cloud_names", known)
 
     def _stored_plan(self, run_id: int | None, rl: RunLog) -> dict:
         src = self.store.run(run_id) if run_id else self.store.latest_with_plan()
@@ -172,7 +198,8 @@ class Engine:
             return {"id": a["id"], "op": "ensure_job", "job_id": a.get("job_id"), "job_name": a["job_name"],
                     "description": a.get("description"), "repository": a.get("repository"),
                     "retention_days": a.get("retention_days"), "start_time": a.get("start_time"),
-                    "template_job": a.get("template_job"), "vms": vms}
+                    "template_job": a.get("template_job"), "gfs": a.get("gfs"),
+                    "encryption_key": a.get("encryption_key"), "vms": vms}
 
         # Phase 1: create jobs, add VMs, fix schedules.
         p1 = []
@@ -184,6 +211,18 @@ class Engine:
             elif a["type"] == "set_schedule":
                 p1.append({"id": a["id"], "op": "set_schedule", "job_id": a["job_id"], "job_name": a["job_name"],
                            "start_time": a["start_time"]})
+            elif a["type"] == "rename_job":
+                p1.append({"id": a["id"], "op": "rename_job", "job_kind": a["job_kind"], "job_id": a["job_id"],
+                           "job_name": a["job_name"], "new_name": a["new_name"]})
+            elif a["type"] == "set_encryption":
+                p1.append({"id": a["id"], "op": "set_encryption", "job_kind": a["job_kind"], "job_id": a["job_id"],
+                           "job_name": a["job_name"], "encryption_key": a["encryption_key"], **self._copy_storage()})
+            elif a["type"] == "set_gfs":
+                p1.append({"id": a["id"], "op": "set_gfs", "job_kind": a["job_kind"], "job_id": a["job_id"],
+                           "job_name": a["job_name"], "day": a["day"], "weeks": a["weeks"]})
+            elif a["type"] == "remove_deleted":
+                p1.append({"id": a["id"], "op": "remove_deleted_vms", "job_id": a["job_id"],
+                           "job_name": a["job_name"], "vms": a["vms"]})
         p2_all = [a for a in todo if a["type"] == "move_vms"]
         p3_all = [a for a in todo if a["type"] == "create_copy"]
 
@@ -196,7 +235,8 @@ class Engine:
             return {"id": a["id"], "op": "ensure_copy", "source_job_id": a.get("source_job_id"),
                     "source_job_name": a["source_job_name"], "copy_name": a["job_name"],
                     "description": a["description"], "repository": a["repository"],
-                    "retention_days": a["retention_days"], "mode": a["mode"]}
+                    "retention_days": a["retention_days"], "mode": a["mode"], "gfs": a.get("gfs"),
+                    "encryption_key": a.get("encryption_key"), **self._copy_storage()}
 
         # Check every phase before anything is sent, so a refusal never leaves a half-applied plan.
         validate_ops(p1 + [retier_op(a) for a in p2_all] + [copy_op(a) for a in p3_all], plan)
@@ -240,4 +280,37 @@ class Engine:
             self.store.save_slots(plan["slot_table"], replace=True)
         if new_slots:
             self.store.save_slots(new_slots, names)
+        self._remember_gfs(todo, results)
         return results
+
+    def _copy_storage(self) -> dict:
+        return {"copy_compression": self.cfg.backup_copy.compression,
+                "copy_optimization": self.cfg.backup_copy.storage_optimization}
+
+    def _remember_gfs(self, todo: list[dict], results: list[dict]) -> None:
+        """Record the GFS day per job key, and what was applied per job (for builds where VBR
+        does not expose GFS settings in a readable form)."""
+        by_id = {a["id"]: a for a in todo}
+        days = dict(self.store.get("gfs_days", {}))
+        applied = dict(self.store.get("gfs_applied", {}))
+        for r in results:
+            a = by_id.get(r["id"])
+            if not a or not r.get("ok") or not r.get("job_id"):
+                continue
+            if a["type"] == "set_gfs":
+                applied[f"{a['job_kind']}:{r['job_id']}"] = f"{a['day']}/{a['weeks']}"
+                days[a["job_key"]] = a["day"]
+            elif a.get("gfs") and a["type"] in ("create_job", "move_vms", "create_copy"):
+                kind = "copy" if a["type"] == "create_copy" else "backup"
+                applied[f"{kind}:{r['job_id']}"] = f"{a['gfs']['day']}/{a['gfs']['weeks']}"
+                days[a["job_key"]] = a["gfs"]["day"]
+        self.store.set("gfs_days", days)
+        self.store.set("gfs_applied", applied)
+        enc = dict(self.store.get("enc_applied", {}))
+        for r in results:
+            a = by_id.get(r["id"])
+            if a and r.get("ok") and r.get("job_id") and a.get("encryption_key"):
+                kind = a.get("job_kind") or ("copy" if a["type"] == "create_copy" else "backup")
+                if a["type"] in ("set_encryption", "create_job", "move_vms", "create_copy"):
+                    enc[f"{kind}:{r['job_id']}"] = a["encryption_key"]
+        self.store.set("enc_applied", enc)
